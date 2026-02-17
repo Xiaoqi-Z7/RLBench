@@ -705,6 +705,7 @@ class Scene(object):
                     f'{camera_name}_camera_far': camera.get_far_clipping_plane(),
                 })
         misc.update({"variation_index": self._variation_index})
+        misc.update({"object_poses": self.task.get_obj_poses()})
         if self.robot.is_bimanual and self._right_execute_demo_joint_position_action is not None:
             
             misc.update({"right_executed_demo_joint_position_action": self._right_execute_demo_joint_position_action,

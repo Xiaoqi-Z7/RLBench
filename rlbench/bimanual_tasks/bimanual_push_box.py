@@ -38,3 +38,9 @@ class BimanualPushBox(BimanualTask):
     def base_rotation_bounds(self) -> Tuple[List[float], List[float]]:
         angle = np.deg2rad(10)
         return [0, 0, - angle], [0, 0, angle]
+    
+    def get_obj_poses(self):
+        poses = {}
+        poses['cube'] = self.item.get_position()
+        poses['target'] = self.target.get_position()
+        return poses
