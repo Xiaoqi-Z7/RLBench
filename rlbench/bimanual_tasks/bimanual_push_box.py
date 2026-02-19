@@ -41,6 +41,6 @@ class BimanualPushBox(BimanualTask):
     
     def get_obj_poses(self):
         poses = {}
-        poses['cube'] = self.item.get_position()
-        poses['target'] = self.target.get_position()
+        poses['cube'] = self.item.get_pose()
+        poses['target'] = self.target.get_pose()
         return poses
