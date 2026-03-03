@@ -64,3 +64,8 @@ class BimanualHandoverItemEasy(BimanualTask):
 
     def base_rotation_bounds(self) -> Tuple[List[float], List[float]]:
         return [0, 0, - np.pi / 8], [0, 0, np.pi / 8]
+    
+    def get_obj_poses(self):
+        poses = {}
+        poses['item'] = self.item.get_pose()
+        return poses
