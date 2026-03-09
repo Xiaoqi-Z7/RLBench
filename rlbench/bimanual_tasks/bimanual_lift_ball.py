@@ -48,3 +48,8 @@ class BimanualLiftBall(BimanualTask):
 
     def base_rotation_bounds(self) -> Tuple[List[float], List[float]]:
         return [0, 0, - np.pi / 8], [0, 0, np.pi / 8]
+    
+    def get_obj_poses(self):
+        poses = {}
+        poses['ball'] = self.ball.get_pose()
+        return poses
