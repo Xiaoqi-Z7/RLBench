@@ -1,4 +1,5 @@
 from abc import abstractmethod
+import time
 
 import numpy as np
 from pyquaternion import Quaternion
@@ -340,10 +341,10 @@ class EndEffectorPoseViaPlanning(ArmActionMode):
                     quaternion=action[3:],
                     ignore_collisions=ignore_collisions,
                     relative_to=relative_to,
-                    trials=200, #..TODO was 100
-                    max_configs=10,
-                    max_time_ms=20, #..TODO was 10
-                    trials_per_goal=10, #..TODO was 5
+                    trials=100, #..TODO was 100
+                    max_configs=10, #..TODO was 10
+                    max_time_ms=10, #..TODO was 10
+                    trials_per_goal=5, #..TODO was 5
                     algorithm=Algos.RRTConnect
                 )
                 return path
@@ -537,4 +538,139 @@ class EndEffectorPoseViaIK(ArmActionMode):
             done = reached or not_moving
 
     def action_shape(self, scene: Scene) -> tuple:
+        return 7,
+
+
+class BimanualEndEffectorPoseViaIKAdvanced(EndEffectorPoseViaIK, EndEffectorPoseViaPlanning):
+    
+    def action(self, scene: Scene, action: np.ndarray, ignore_collisions):
+        assert_action_shape(action, self.action_shape(scene))
+
+        right_action = action[:7]
+        left_action = action[7:]
+
+        right_ignore_collision = ignore_collisions[0]
+        left_ignore_collison = ignore_collisions[1]
+
+        assert_unit_quaternion(right_action[3:])
+        assert_unit_quaternion(left_action[3:])
+
+        if not self._absolute_mode and self._frame != 'end effector':
+            right_action = calculate_delta_pose(scene.robot.right_arm, right_action)
+            left_action = calculate_delta_pose(scene.robot.left_arm, left_action)
+
+        relative_to_right = None if self._frame == 'world' else scene.robot.right_arm.get_tip()
+        relative_to_left = None if self._frame == 'world' else scene.robot.left_arm.get_tip()
+
+        right_ik_success = False
+        left_ik_success = False
+        try:
+            right_joint_positions = scene.robot.right_arm.solve_ik_via_jacobian(
+                right_action[:3], quaternion=right_action[3:], relative_to=relative_to_right)
+            right_ik_success = True
+            scene.robot.right_arm.set_joint_target_positions(right_joint_positions)
+        except IKError as e:
+            # raise InvalidActionError(
+            #     'Could not perform IK via Jacobian; most likely due to current '
+            #     'right end-effector pose being too far from the given target pose. '
+            #     'Try limiting/bounding your action space.') from e
+            
+            print("right ik failed, trying using EndEffectorPoseViaPlanning")
+            right_path = self.get_path(scene, right_action, right_ignore_collision, scene.robot.right_arm, scene.robot.right_gripper)
+            if right_path:
+                right_done = False
+
+
+        
+        try:
+            left_joint_positions = scene.robot.left_arm.solve_ik_via_jacobian(
+                left_action[:3], quaternion=left_action[3:], relative_to=relative_to_left)
+            left_ik_success = True
+            scene.robot.left_arm.set_joint_target_positions(left_joint_positions)
+        except IKError as e:
+            # raise InvalidActionError(
+            #     'Could not perform IK via Jacobian; most likely due to current '
+            #     'left end-effector pose being too far from the given target pose. '
+            #     'Try limiting/bounding your action space.') from e
+            print("left ik failed, trying using EndEffectorPoseViaPlanning")
+            left_path = self.get_path(scene, left_action, left_ignore_collison, scene.robot.left_arm, scene.robot.left_gripper)
+            if left_path:
+                left_done = False
+
+        done = False
+        prev_right_values = None
+        prev_left_values = None
+        limit_time = 2 # seconds
+        duration = 0
+        # Move until reached target joint positions or until we stop moving
+        # (e.g. when we collide wth something)
+        start_time = time.time()
+        while not done:
+            if right_ik_success and left_ik_success:
+                scene.step()
+
+                if self._callable_each_step is not None:
+                    self._callable_each_step(scene.get_observation())
+
+                cur_right_positions = scene.robot.right_arm.get_joint_positions()
+                cur_left_positions = scene.robot.left_arm.get_joint_positions()
+
+                right_reached = np.allclose(cur_right_positions, right_joint_positions, atol=0.01)
+                left_reached = np.allclose(cur_left_positions, left_joint_positions, atol=0.01)
+
+                not_moving = False
+                if prev_right_values is not None and prev_left_values is not None:
+                    not_moving = (np.allclose(
+                        cur_right_positions, prev_right_values, atol=0.001) and
+                        np.allclose(cur_left_positions, prev_left_values, atol=0.001))
+                prev_right_values = cur_right_positions
+                prev_left_values = cur_left_positions
+
+                done = (right_reached and left_reached) or not_moving
+
+            elif right_ik_success and not left_ik_success:
+                if not left_done:
+                    left_done = left_path.step()
+                cur_right_positions = scene.robot.right_arm.get_joint_positions()
+                right_reached = np.allclose(cur_right_positions, right_joint_positions, atol=0.01)
+                done = right_reached and left_done
+                scene.step()
+                if self._callable_each_step is not None:
+                    self._callable_each_step(scene.get_observation())
+
+            elif not right_ik_success and left_ik_success:
+                if not right_done:
+                    right_done = right_path.step()
+                cur_left_positions = scene.robot.left_arm.get_joint_positions()
+                left_reached = np.allclose(cur_left_positions, left_joint_positions, atol=0.01)
+                done = left_reached and right_done
+                scene.step()
+                if self._callable_each_step is not None:
+                    self._callable_each_step(scene.get_observation())
+
+            else:
+                if not right_done:
+                    right_done = right_path.step()
+                if not left_done:
+                    left_done = left_path.step()
+                done = right_done and left_done
+                scene.step()
+                if self._callable_each_step is not None:
+                    self._callable_each_step(scene.get_observation())
+            
+            end_time = time.time()
+            duration = end_time - start_time
+            if duration > limit_time:
+                print("Time limit exceeded while trying to reach target pose via IK or planning. Breaking out of loop.")
+                break
+            
+            success, terminate = scene.task.success()
+            # If the task succeeds while traversing path, then break early
+            if success:
+                break
+                
+    def action_shape(self, scene: Scene) -> tuple:
+        return 14,
+
+    def unimanual_action_shape(self, scene: Scene) -> tuple:
         return 7,
