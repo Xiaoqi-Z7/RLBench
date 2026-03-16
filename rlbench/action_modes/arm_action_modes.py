@@ -451,6 +451,9 @@ class BimanualEndEffectorPoseViaPlanning(EndEffectorPoseViaPlanning):
 
         done = False
 
+        limit_time = 10 # seconds
+        duration = 0
+        start_time = time.time()
         while not done:
             if not right_done and right_path:
                 right_done = right_path.step()
@@ -465,6 +468,12 @@ class BimanualEndEffectorPoseViaPlanning(EndEffectorPoseViaPlanning):
             success, terminate = scene.task.success()
             # If the task succeeds while traversing path, then break early
             if success:
+                break
+            
+            End_time = time.time()
+            duration = End_time - start_time
+            if duration > limit_time:
+                logging.warning(f"Time limit {limit_time} exceeded while trying to reach target pose via IK or planning. Breaking out of loop.")
                 break
     
     def action_shape(self, scene: Scene) -> tuple:
