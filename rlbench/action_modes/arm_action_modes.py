@@ -451,6 +451,9 @@ class BimanualEndEffectorPoseViaPlanning(EndEffectorPoseViaPlanning):
 
         done = False
 
+        limit_time = 8 # seconds
+        duration = 0
+        start_time = time.time()
         while not done:
             if not right_done and right_path:
                 right_done = right_path.step()
@@ -460,12 +463,24 @@ class BimanualEndEffectorPoseViaPlanning(EndEffectorPoseViaPlanning):
             done = right_done and left_done
             scene.step()
             if self._callable_each_step is not None:
-                self._callable_each_step(scene.get_observation())
+                if not isinstance(self._callable_each_step, tuple):
+                    self._callable_each_step(scene.get_observation())
+                else:
+                    self._callable_each_step[0](scene.get_observation())
+                    self._callable_each_step[1](scene.get_observation())
 
             success, terminate = scene.task.success()
             # If the task succeeds while traversing path, then break early
             if success:
                 break
+            end_time = time.time()
+            duration = end_time - start_time
+            if duration > limit_time:
+                logging.warning(f"Path execution time {duration} exceeded limit of {limit_time} seconds, breaking out of loop.")
+                break
+
+    def set_callable_each_step(self, callable_each_step):
+        self._callable_each_step = callable_each_step
     
     def action_shape(self, scene: Scene) -> tuple:
         return 14,
