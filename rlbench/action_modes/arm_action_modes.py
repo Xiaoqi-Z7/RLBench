@@ -451,7 +451,7 @@ class BimanualEndEffectorPoseViaPlanning(EndEffectorPoseViaPlanning):
 
         done = False
 
-        limit_time = 8 # seconds
+        limit_time = 10 # seconds
         duration = 0
         start_time = time.time()
         while not done:
@@ -479,9 +479,6 @@ class BimanualEndEffectorPoseViaPlanning(EndEffectorPoseViaPlanning):
                 logging.warning(f"Path execution time {duration} exceeded limit of {limit_time} seconds, breaking out of loop.")
                 break
 
-    def set_callable_each_step(self, callable_each_step):
-        self._callable_each_step = callable_each_step
-    
     def action_shape(self, scene: Scene) -> tuple:
         return 14,
 
