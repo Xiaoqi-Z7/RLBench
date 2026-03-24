@@ -341,10 +341,10 @@ class EndEffectorPoseViaPlanning(ArmActionMode):
                     quaternion=action[3:],
                     ignore_collisions=ignore_collisions,
                     relative_to=relative_to,
-                    trials=100, #..TODO was 100
+                    trials=200, #..TODO was 100
                     max_configs=10, #..TODO was 10
-                    max_time_ms=10, #..TODO was 10
-                    trials_per_goal=5, #..TODO was 5
+                    max_time_ms=20, #..TODO was 10
+                    trials_per_goal=10, #..TODO was 5
                     algorithm=Algos.RRTConnect
                 )
                 return path
@@ -451,7 +451,7 @@ class BimanualEndEffectorPoseViaPlanning(EndEffectorPoseViaPlanning):
 
         done = False
 
-        limit_time = 4 # seconds
+        limit_time = 30 # seconds
         duration = 0
         start_time = time.time()
         while not done:
