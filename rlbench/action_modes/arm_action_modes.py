@@ -690,6 +690,7 @@ class BimanualEndEffectorPoseViaIKAdvanced(EndEffectorPoseViaIK, EndEffectorPose
     def unimanual_action_shape(self, scene: Scene) -> tuple:
         return 7,
 
+
 class BimanualOSC(ArmActionMode):
     """Cartesian impedance controller
     """
@@ -697,27 +698,37 @@ class BimanualOSC(ArmActionMode):
     TORQUE_MAX_VEL = 9999.0
 
     def __init__(self,
-                 absolute_mode: bool = True,
-                 frame: str = 'world',
+                 target_mode: str = 'world',
                  pos_gain: float = 8.0,
                  rot_gain: float = 4.0,
                  damping: float = 0.05,
                  nullspace_gain: float = 0.2,
                  nullspace_damping: float = 0.05,
+                 desired_task_velocity: np.ndarray = None,
                  max_torque: float = 40.0):
-        self._absolute_mode = absolute_mode
-        self._frame = frame
+        # Supported target modes:
+        # - 'world': absolute world-frame pose (default)
+        # - 'world_delta': delta pose in world frame
+        # - 'ee_delta': delta pose in end-effector frame
+        self._target_mode = target_mode
+        if self._target_mode not in ['world', 'world_delta', 'ee_delta']:
+            raise ValueError(
+                "Expected target_mode to be one of: 'world', 'world_delta', 'ee_delta'")
+
         self._pos_gain = pos_gain
         self._rot_gain = rot_gain
         self._damping = damping
         self._nullspace_gain = nullspace_gain
         self._nullspace_damping = nullspace_damping
+        if desired_task_velocity is None:
+            self._desired_task_velocity = np.zeros(6)
+        else:
+            self._desired_task_velocity = np.asarray(desired_task_velocity, dtype=float)
+            if self._desired_task_velocity.shape != (6,):
+                raise ValueError('Expected desired_task_velocity to have shape (6,).')
         self._max_torque = max_torque
         self._right_q_rest = None
         self._left_q_rest = None
-
-        if frame not in ['world', 'end effector']:
-            raise ValueError("Expected frame to one of: 'world, 'end effector'")
 
     @staticmethod
     def _compose_delta_pose(current_pose: np.ndarray,
@@ -757,14 +768,18 @@ class BimanualOSC(ArmActionMode):
         return 2.0 * sign * np.array([q_err.x, q_err.y, q_err.z])
 
     def _compute_target_pose(self, arm: Arm, action: np.ndarray) -> np.ndarray:
-        current_pose = np.array(arm.get_tip().get_pose())
-        if self._frame == 'end effector':
-            return self._compose_delta_pose(
-                current_pose, action, position_in_tip_frame=True)
-        if self._absolute_mode:
+        if self._target_mode == 'world':
+            # Absolute world-frame pose [x, y, z, qx, qy, qz, qw].
             return np.array(action)
+
+        current_pose = np.array(arm.get_tip().get_pose())
+        if self._target_mode == 'world_delta':
+            return self._compose_delta_pose(
+                current_pose, action, position_in_tip_frame=False)
+
+        # self._target_mode == 'ee_delta'
         return self._compose_delta_pose(
-            current_pose, action, position_in_tip_frame=False)
+            current_pose, action, position_in_tip_frame=True)
 
     def _osc_step(self,
                   arm: Arm,
@@ -791,7 +806,8 @@ class BimanualOSC(ArmActionMode):
             self._rot_gain,
         ])
         task_kd = 2.0 * np.sqrt(task_kp)
-        desired_wrench = task_kp * task_err - task_kd * task_vel
+        vel_err = self._desired_task_velocity - task_vel
+        desired_wrench = task_kp * task_err + task_kd * vel_err
 
         jjt = jacobian @ jacobian.T
         damped_inv = np.linalg.inv(
