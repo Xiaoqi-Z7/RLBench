@@ -689,3 +689,155 @@ class BimanualEndEffectorPoseViaIKAdvanced(EndEffectorPoseViaIK, EndEffectorPose
 
     def unimanual_action_shape(self, scene: Scene) -> tuple:
         return 7,
+
+class BimanualOSC(ArmActionMode):
+    """Cartesian impedance controller
+    """
+
+    TORQUE_MAX_VEL = 9999.0
+
+    def __init__(self,
+                 absolute_mode: bool = True,
+                 frame: str = 'world',
+                 pos_gain: float = 8.0,
+                 rot_gain: float = 4.0,
+                 damping: float = 0.05,
+                 nullspace_gain: float = 0.2,
+                 nullspace_damping: float = 0.05,
+                 max_torque: float = 40.0):
+        self._absolute_mode = absolute_mode
+        self._frame = frame
+        self._pos_gain = pos_gain
+        self._rot_gain = rot_gain
+        self._damping = damping
+        self._nullspace_gain = nullspace_gain
+        self._nullspace_damping = nullspace_damping
+        self._max_torque = max_torque
+        self._right_q_rest = None
+        self._left_q_rest = None
+
+        if frame not in ['world', 'end effector']:
+            raise ValueError("Expected frame to one of: 'world, 'end effector'")
+
+    @staticmethod
+    def _compose_delta_pose(current_pose: np.ndarray,
+                            delta_action: np.ndarray,
+                            position_in_tip_frame: bool) -> np.ndarray:
+        c_x, c_y, c_z, c_qx, c_qy, c_qz, c_qw = current_pose
+        d_x, d_y, d_z, d_qx, d_qy, d_qz, d_qw = delta_action
+
+        current_q = Quaternion(c_qw, c_qx, c_qy, c_qz)
+        if position_in_tip_frame:
+            d_x, d_y, d_z = current_q.rotate([d_x, d_y, d_z])
+
+        new_q = Quaternion(d_qw, d_qx, d_qy, d_qz) * current_q
+        n_qw, n_qx, n_qy, n_qz = list(new_q)
+        return np.array([
+            c_x + d_x,
+            c_y + d_y,
+            c_z + d_z,
+            n_qx,
+            n_qy,
+            n_qz,
+            n_qw,
+        ])
+
+    @staticmethod
+    def _quaternion_error(target_quat_xyzw: np.ndarray,
+                          current_quat_xyzw: np.ndarray) -> np.ndarray:
+        # Use the quaternion vector part scaled by sign(w) for a stable
+        # small-angle orientation error in axis-angle space.
+        t_qx, t_qy, t_qz, t_qw = target_quat_xyzw
+        c_qx, c_qy, c_qz, c_qw = current_quat_xyzw
+
+        q_target = Quaternion(t_qw, t_qx, t_qy, t_qz)
+        q_current = Quaternion(c_qw, c_qx, c_qy, c_qz)
+        q_err = (q_target * q_current.inverse).normalised
+        sign = 1.0 if q_err.w >= 0.0 else -1.0
+        return 2.0 * sign * np.array([q_err.x, q_err.y, q_err.z])
+
+    def _compute_target_pose(self, arm: Arm, action: np.ndarray) -> np.ndarray:
+        current_pose = np.array(arm.get_tip().get_pose())
+        if self._frame == 'end effector':
+            return self._compose_delta_pose(
+                current_pose, action, position_in_tip_frame=True)
+        if self._absolute_mode:
+            return np.array(action)
+        return self._compose_delta_pose(
+            current_pose, action, position_in_tip_frame=False)
+
+    def _osc_step(self,
+                  arm: Arm,
+                  target_pose: np.ndarray,
+                  q_rest: np.ndarray) -> np.ndarray:
+        q = np.array(arm.get_joint_positions())
+        qd = np.array(arm.get_joint_velocities())
+        tip_pose = np.array(arm.get_tip().get_pose())
+
+        pos_err = target_pose[:3] - tip_pose[:3]
+        rot_err = self._quaternion_error(target_pose[3:], tip_pose[3:])
+        task_err = np.concatenate([pos_err, rot_err], axis=0)
+
+        jacobian = np.array(arm.get_jacobian())
+        jacobian = jacobian[:6, :]
+
+        task_vel = jacobian @ qd
+        task_kp = np.array([
+            self._pos_gain,
+            self._pos_gain,
+            self._pos_gain,
+            self._rot_gain,
+            self._rot_gain,
+            self._rot_gain,
+        ])
+        task_kd = 2.0 * np.sqrt(task_kp)
+        desired_wrench = task_kp * task_err - task_kd * task_vel
+
+        jjt = jacobian @ jacobian.T
+        damped_inv = np.linalg.inv(
+            jjt + (self._damping ** 2) * np.eye(jjt.shape[0]))
+        jacobian_pinv = jacobian.T @ damped_inv
+
+        tau_task = jacobian.T @ desired_wrench
+
+        nullspace_projector = np.eye(jacobian.shape[1]) - jacobian_pinv @ jacobian
+        tau_null = self._nullspace_gain * (q_rest - q) - self._nullspace_damping * qd
+        tau_cmd = tau_task + nullspace_projector @ tau_null
+        tau_cmd = np.clip(tau_cmd, -self._max_torque, self._max_torque)
+        return tau_cmd
+
+    def _apply_joint_torques(self, arm: Arm, tau: np.ndarray):
+        tml = BimanualOSC.TORQUE_MAX_VEL
+        arm.set_joint_target_velocities(
+            [(tml if t < 0.0 else -tml) for t in tau.tolist()])
+        arm.set_joint_forces(np.abs(tau).tolist())
+
+    def action_pre_step(self, scene: Scene, action: np.ndarray):
+        assert_action_shape(action, self.action_shape(scene))
+
+        right_action = np.array(action[:7])
+        left_action = np.array(action[7:])
+        assert_unit_quaternion(right_action[3:])
+        assert_unit_quaternion(left_action[3:])
+
+        if self._right_q_rest is None:
+            self._right_q_rest = np.array(scene.robot.right_arm.get_joint_positions())
+        if self._left_q_rest is None:
+            self._left_q_rest = np.array(scene.robot.left_arm.get_joint_positions())
+
+        right_target_pose = self._compute_target_pose(scene.robot.right_arm, right_action)
+        left_target_pose = self._compute_target_pose(scene.robot.left_arm, left_action)
+
+        right_tau = self._osc_step(
+            scene.robot.right_arm, right_target_pose, self._right_q_rest)
+        left_tau = self._osc_step(
+            scene.robot.left_arm, left_target_pose, self._left_q_rest)
+
+        self._apply_joint_torques(scene.robot.right_arm, right_tau)
+        self._apply_joint_torques(scene.robot.left_arm, left_tau)
+
+    def action_shape(self, scene: Scene) -> tuple:
+        return 14,
+
+    def unimanual_action_shape(self, scene: Scene) -> tuple:
+        return 7,
