@@ -699,8 +699,8 @@ class BimanualOSC(ArmActionMode):
 
     def __init__(self,
                  target_mode: str = 'world',
-                 pos_gain: float = 8.0,
-                 rot_gain: float = 4.0,
+                 pos_gain: float = 1500.0,
+                 rot_gain: float = 1500.0,
                  damping: float = 0.05,
                  nullspace_gain: float = 0.2,
                  nullspace_damping: float = 0.05,
@@ -756,16 +756,15 @@ class BimanualOSC(ArmActionMode):
     @staticmethod
     def _quaternion_error(target_quat_xyzw: np.ndarray,
                           current_quat_xyzw: np.ndarray) -> np.ndarray:
-        # Use the quaternion vector part scaled by sign(w) for a stable
-        # small-angle orientation error in axis-angle space.
+        # Return Euler angle error in radians (roll, pitch, yaw).
         t_qx, t_qy, t_qz, t_qw = target_quat_xyzw
         c_qx, c_qy, c_qz, c_qw = current_quat_xyzw
 
         q_target = Quaternion(t_qw, t_qx, t_qy, t_qz)
         q_current = Quaternion(c_qw, c_qx, c_qy, c_qz)
         q_err = (q_target * q_current.inverse).normalised
-        sign = 1.0 if q_err.w >= 0.0 else -1.0
-        return 2.0 * sign * np.array([q_err.x, q_err.y, q_err.z])
+        yaw, pitch, roll = q_err.yaw_pitch_roll
+        return np.array([roll, pitch, yaw])
 
     def _compute_target_pose(self, arm: Arm, action: np.ndarray) -> np.ndarray:
         if self._target_mode == 'world':
@@ -793,8 +792,7 @@ class BimanualOSC(ArmActionMode):
         rot_err = self._quaternion_error(target_pose[3:], tip_pose[3:])
         task_err = np.concatenate([pos_err, rot_err], axis=0)
 
-        jacobian = np.array(arm.get_jacobian())
-        jacobian = jacobian[:6, :]
+        jacobian = np.array(arm.get_jacobian()).T
 
         task_vel = jacobian @ qd
         task_kp = np.array([
@@ -806,8 +804,8 @@ class BimanualOSC(ArmActionMode):
             self._rot_gain,
         ])
         task_kd = 2.0 * np.sqrt(task_kp)
-        vel_err = self._desired_task_velocity - task_vel
-        desired_wrench = task_kp * task_err + task_kd * vel_err
+        # vel_err = self._desired_task_velocity - task_vel
+        desired_wrench = task_kp * task_err + task_kd * (self._desired_task_velocity - task_vel)
 
         jjt = jacobian @ jacobian.T
         damped_inv = np.linalg.inv(
@@ -818,7 +816,7 @@ class BimanualOSC(ArmActionMode):
 
         nullspace_projector = np.eye(jacobian.shape[1]) - jacobian_pinv @ jacobian
         tau_null = self._nullspace_gain * (q_rest - q) - self._nullspace_damping * qd
-        tau_cmd = tau_task + nullspace_projector @ tau_null
+        tau_cmd = tau_task  # + nullspace_projector @ tau_null
         tau_cmd = np.clip(tau_cmd, -self._max_torque, self._max_torque)
         return tau_cmd
 

@@ -84,7 +84,7 @@ class BimanualMoveArmThenGripper(MoveArmThenGripper):
         left_ignore_collisions = bool(left_action[arm_action_size+ee_action_size:arm_action_size+ee_action_size+1])
         ignore_collisions = [right_ignore_collisions, left_ignore_collisions]
 
-        if self.arm_action_mode.__class__.__name__ == "BimanualJointPosition":
+        if self.arm_action_mode.__class__.__name__ in ["BimanualJointPosition", "BimanualOSC"]:
             self.arm_action_mode.action(scene, arm_action)
         else:
             self.arm_action_mode.action(scene, arm_action, ignore_collisions)
