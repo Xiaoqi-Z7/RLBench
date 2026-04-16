@@ -692,57 +692,114 @@ class BimanualEndEffectorPoseViaIKAdvanced(EndEffectorPoseViaIK, EndEffectorPose
 
 
 class BimanualOSC(ArmActionMode):
-    """Cartesian impedance controller
+    """Operational Space Control (OSC) for bimanual arms.
+    
+    Implements impedance-based Cartesian control in task space.
+    Inspired by Khatib 1987 OSC framework, but adapted to RLBench 
+    constraints (Jacobian-only, no mass matrix inversion).
+    
+    Key improvements over simple IK:
+    - Natural compliance via impedance control (stiffness + damping)
+    - Smooth velocity feedback instead of on/off control
+    - Proper nullspace handling for redundant DOFs
+    - Flexible reference frames (world/ee) and action types (absolute/delta)
     """
 
     TORQUE_MAX_VEL = 9999.0
 
     def __init__(self,
-                 target_mode: str = 'world',
-                 pos_gain: float = 1500.0,
-                 rot_gain: float = 1500.0,
-                 damping: float = 0.05,
+                 input_type: str = 'absolute',
+                 frame: str = 'world',
+                 kp_pos: float = 1500.0,
+                 kp_rot: float = 1500.0,
+                 damping_ratio_pos: float = 1.0,
+                 damping_ratio_rot: float = 1.0,
                  nullspace_gain: float = 0.2,
                  nullspace_damping: float = 0.05,
-                 desired_task_velocity: np.ndarray = None,
-                 max_torque: float = 40.0):
-        # Supported target modes:
-        # - 'world': absolute world-frame pose (default)
-        # - 'world_delta': delta pose in world frame
-        # - 'ee_delta': delta pose in end-effector frame
-        self._target_mode = target_mode
-        if self._target_mode not in ['world', 'world_delta', 'ee_delta']:
-            raise ValueError(
-                "Expected target_mode to be one of: 'world', 'world_delta', 'ee_delta'")
-
-        self._pos_gain = pos_gain
-        self._rot_gain = rot_gain
-        self._damping = damping
+                 damped_inv_lambda: float = 0.05,
+                 max_torque: float = 40.0,
+                 desired_task_velocity: np.ndarray = None):
+        """
+        Args:
+            input_type (str): 'absolute' or 'delta' action interpretation
+            frame (str): 'world' or 'ee' (end-effector) reference frame
+            kp_pos (float): Proportional gain for position [N/m]
+            kp_rot (float): Proportional gain for rotation [N·m/rad]
+            damping_ratio_pos (float): Damping ratio for position (1.0 = critical damping)
+            damping_ratio_rot (float): Damping ratio for rotation
+            nullspace_gain (float): Gain for nullspace control
+            nullspace_damping (float): Nullspace control damping
+            damped_inv_lambda (float): Damping parameter for Jacobian pseudo-inverse
+            max_torque (float): Torque clipping limit [N·m]
+            desired_task_velocity (np.ndarray): Optional desired task-space velocity [6,]
+        """
+        assert input_type in ['delta', 'absolute'], \
+            f"input_type must be 'delta' or 'absolute', got {input_type}"
+        assert frame in ['world', 'ee'], \
+            f"frame must be 'world' or 'ee', got {frame}"
+        
+        self._input_type = input_type
+        self._frame = frame
+        
+        # Impedance parameters (following robosuite convention)
+        self._kp_pos = kp_pos
+        self._kp_rot = kp_rot
+        # Derivative gains computed from kp and damping ratio
+        # kd = 2 * sqrt(kp) * damping_ratio
+        self._kd_pos = 2.0 * np.sqrt(kp_pos) * damping_ratio_pos
+        self._kd_rot = 2.0 * np.sqrt(kp_rot) * damping_ratio_rot
+        
+        # Nullspace control parameters
         self._nullspace_gain = nullspace_gain
         self._nullspace_damping = nullspace_damping
+        
+        # Jacobian damping (for pseudo-inverse stability)
+        self._damped_inv_lambda = damped_inv_lambda
+        self._max_torque = max_torque
+        
+        # Optional desired task velocity for feedforward
         if desired_task_velocity is None:
             self._desired_task_velocity = np.zeros(6)
         else:
             self._desired_task_velocity = np.asarray(desired_task_velocity, dtype=float)
             if self._desired_task_velocity.shape != (6,):
                 raise ValueError('Expected desired_task_velocity to have shape (6,).')
-        self._max_torque = max_torque
+        
+        # Cache rest poses for nullspace control
         self._right_q_rest = None
         self._left_q_rest = None
+        
+        logging.info(f"BimanualOSC initialized: input_type={input_type}, frame={frame}, "
+                    f"kp_pos={kp_pos}, kp_rot={kp_rot}")
 
     @staticmethod
     def _compose_delta_pose(current_pose: np.ndarray,
                             delta_action: np.ndarray,
-                            position_in_tip_frame: bool) -> np.ndarray:
+                            frame: str = 'world') -> np.ndarray:
+        """Compose target pose from current pose and delta action.
+        
+        Args:
+            current_pose (np.ndarray): Current [x, y, z, qx, qy, qz, qw]
+            delta_action (np.ndarray): Delta [dx, dy, dz, dqx, dqy, dqz, dqw]
+            frame (str): 'world' - position delta in world frame
+                        'ee' - position delta in end-effector frame
+        
+        Returns:
+            np.ndarray: Target pose [x, y, z, qx, qy, qz, qw]
+        """
         c_x, c_y, c_z, c_qx, c_qy, c_qz, c_qw = current_pose
         d_x, d_y, d_z, d_qx, d_qy, d_qz, d_qw = delta_action
 
         current_q = Quaternion(c_qw, c_qx, c_qy, c_qz)
-        if position_in_tip_frame:
+        
+        # If frame is 'ee', rotate position delta into world frame
+        if frame == 'ee':
             d_x, d_y, d_z = current_q.rotate([d_x, d_y, d_z])
-
+        
+        # Compose rotation: apply delta rotation, then current rotation
         new_q = Quaternion(d_qw, d_qx, d_qy, d_qz) * current_q
         n_qw, n_qx, n_qy, n_qz = list(new_q)
+        
         return np.array([
             c_x + d_x,
             c_y + d_y,
@@ -756,68 +813,131 @@ class BimanualOSC(ArmActionMode):
     @staticmethod
     def _quaternion_error(target_quat_xyzw: np.ndarray,
                           current_quat_xyzw: np.ndarray) -> np.ndarray:
-        # Return Euler angle error in radians (roll, pitch, yaw).
+        """Compute orientation error in Euler angles (small angle approximation).
+        
+        For small angles, the error quaternion can be converted to rotation vector 
+        which approximates Euler angles.
+        
+        Args:
+            target_quat_xyzw (np.ndarray): Target quaternion [qx, qy, qz, qw]
+            current_quat_xyzw (np.ndarray): Current quaternion [qx, qy, qz, qw]
+        
+        Returns:
+            np.ndarray: Orientation error [roll, pitch, yaw] in radians
+        """
         t_qx, t_qy, t_qz, t_qw = target_quat_xyzw
         c_qx, c_qy, c_qz, c_qw = current_quat_xyzw
 
         q_target = Quaternion(t_qw, t_qx, t_qy, t_qz)
         q_current = Quaternion(c_qw, c_qx, c_qy, c_qz)
+        # Error quaternion: how much to rotate from current to target
         q_err = (q_target * q_current.inverse).normalised
+        
+        # Convert to Euler angles for intuitive error representation
         yaw, pitch, roll = q_err.yaw_pitch_roll
         return np.array([roll, pitch, yaw])
 
     def _compute_target_pose(self, arm: Arm, action: np.ndarray) -> np.ndarray:
-        if self._target_mode == 'world':
-            # Absolute world-frame pose [x, y, z, qx, qy, qz, qw].
-            return np.array(action)
-
+        """Compute target pose from action based on input_type and frame.
+        
+        Args:
+            arm (Arm): Robot arm object
+            action (np.ndarray): Action [x, y, z, qx, qy, qz, qw]
+        
+        Returns:
+            np.ndarray: Target pose [x, y, z, qx, qy, qz, qw]
+        """
         current_pose = np.array(arm.get_tip().get_pose())
-        if self._target_mode == 'world_delta':
-            return self._compose_delta_pose(
-                current_pose, action, position_in_tip_frame=False)
-
-        # self._target_mode == 'ee_delta'
-        return self._compose_delta_pose(
-            current_pose, action, position_in_tip_frame=True)
+        
+        if self._input_type == 'absolute':
+            # Absolute mode: action is the target pose directly
+            return np.array(action)
+        
+        # Delta mode: compose target from current pose and delta action
+        # Input frame: 'world' or 'ee' (end-effector)
+        return self._compose_delta_pose(current_pose, action, frame=self._frame)
 
     def _osc_step(self,
                   arm: Arm,
                   target_pose: np.ndarray,
                   q_rest: np.ndarray) -> np.ndarray:
+        """Execute one OSC control step via impedance control.
+        
+        Computes joint torques to track target pose with impedance control:
+        - Task-space PD control: F = kp * e_pos + kd * e_vel
+        - Jacobian mapping to joint space with damping
+        - Nullspace control for maintaining initial pose
+        
+        Args:
+            arm (Arm): Robot arm object
+            target_pose (np.ndarray): Target pose [x, y, z, qx, qy, qz, qw]
+            q_rest (np.ndarray): Rest joint positions for nullspace control
+        
+        Returns:
+            np.ndarray: Joint torque commands
+        """
+        # Current state
         q = np.array(arm.get_joint_positions())
         qd = np.array(arm.get_joint_velocities())
         tip_pose = np.array(arm.get_tip().get_pose())
-
-        pos_err = target_pose[:3] - tip_pose[:3]
-        rot_err = self._quaternion_error(target_pose[3:], tip_pose[3:])
-        task_err = np.concatenate([pos_err, rot_err], axis=0)
-
-        jacobian = np.array(arm.get_jacobian()).T
-
-        task_vel = jacobian @ qd
+        
+        # Task-space errors
+        pos_err = target_pose[:3] - tip_pose[:3]  # [m]
+        rot_err = self._quaternion_error(target_pose[3:], tip_pose[3:])  # [rad]
+        task_err = np.concatenate([pos_err, rot_err], axis=0)  # [6,]
+        
+        # Jacobian (transpose of what arm provides; arm.get_jacobian() is typically 6xN)
+        jacobian = np.array(arm.get_jacobian()).T  # Now N x 6
+        
+        # Task-space velocity via forward kinematics (Jacobian * joint_velocity)
+        task_vel = jacobian @ qd  # [6,]
+        
+        # Impedance control gains
         task_kp = np.array([
-            self._pos_gain,
-            self._pos_gain,
-            self._pos_gain,
-            self._rot_gain,
-            self._rot_gain,
-            self._rot_gain,
+            self._kp_pos, self._kp_pos, self._kp_pos,      # position gains
+            self._kp_rot, self._kp_rot, self._kp_rot,       # rotation gains
         ])
-        task_kd = 2.0 * np.sqrt(task_kp)
-        # vel_err = self._desired_task_velocity - task_vel
-        desired_wrench = task_kp * task_err + task_kd * (self._desired_task_velocity - task_vel)
-
-        jjt = jacobian @ jacobian.T
-        damped_inv = np.linalg.inv(
-            jjt + (self._damping ** 2) * np.eye(jjt.shape[0]))
-        jacobian_pinv = jacobian.T @ damped_inv
-
-        tau_task = jacobian.T @ desired_wrench
-
-        nullspace_projector = np.eye(jacobian.shape[1]) - jacobian_pinv @ jacobian
-        tau_null = self._nullspace_gain * (q_rest - q) - self._nullspace_damping * qd
-        tau_cmd = tau_task  # + nullspace_projector @ tau_null
+        task_kd = np.array([
+            self._kd_pos, self._kd_pos, self._kd_pos,       # position damping
+            self._kd_rot, self._kd_rot, self._kd_rot,        # rotation damping
+        ])
+        
+        # Desired wrench computed from impedance law:
+        # F = kp * e_task + kd * (v_desired - v_current)
+        vel_err = self._desired_task_velocity - task_vel
+        desired_wrench = np.multiply(task_kp, task_err) + np.multiply(task_kd, vel_err)  # [6,]
+        
+        # --- Jacobian pseudo-inverse with Tikhonov damping ---
+        # Avoid singularities via dampedInverse: (J^T J + lambda^2 I)^-1 J^T
+        jjt = jacobian @ jacobian.T  # [6 x 6]
+        damping_matrix = (self._damped_inv_lambda ** 2) * np.eye(jjt.shape[0])
+        jjt_damped = jjt + damping_matrix
+        
+        try:
+            jjt_damped_inv = np.linalg.inv(jjt_damped)
+            jacobian_pinv = jacobian.T @ jjt_damped_inv  # [N x 6]
+        except np.linalg.LinAlgError:
+            logging.warning("Jacobian pseudo-inverse computation failed, using pseudo-inverse fallback")
+            jacobian_pinv = np.linalg.pinv(jacobian, rcond=1e-4)  # Fallback
+        
+        # Map task wrench to joint torques
+        tau_task = jacobian.T @ desired_wrench  # [N,]
+        
+        # --- Nullspace control ---
+        # Nullspace projector: N = I - J_pinv @ J
+        nullspace_proj = np.eye(jacobian.shape[0]) - jacobian_pinv @ jacobian
+        
+        # Nullspace PD control to maintain rest pose (q_rest)
+        q_err_ns = q_rest - q
+        tau_null = (self._nullspace_gain * q_err_ns - 
+                    self._nullspace_damping * qd)
+        
+        # Total torque command (task + nullspace)
+        tau_cmd = tau_task + nullspace_proj @ tau_null
+        
+        # Clip to max torque
         tau_cmd = np.clip(tau_cmd, -self._max_torque, self._max_torque)
+        
         return tau_cmd
 
     def _apply_joint_torques(self, arm: Arm, tau: np.ndarray):
@@ -827,26 +947,39 @@ class BimanualOSC(ArmActionMode):
         arm.set_joint_forces(np.abs(tau).tolist())
 
     def action_pre_step(self, scene: Scene, action: np.ndarray):
+        """Execute OSC for both arms.
+        
+        Args:
+            scene (Scene): RLBench scene
+            action (np.ndarray): Shape [14,] = [right_pose (7), left_pose (7)]
+                where each pose is [x, y, z, qx, qy, qz, qw]
+        """
         assert_action_shape(action, self.action_shape(scene))
 
         right_action = np.array(action[:7])
         left_action = np.array(action[7:])
+        
+        # Validate quaternions in action
         assert_unit_quaternion(right_action[3:])
         assert_unit_quaternion(left_action[3:])
 
+        # Initialize rest poses on first call
         if self._right_q_rest is None:
             self._right_q_rest = np.array(scene.robot.right_arm.get_joint_positions())
         if self._left_q_rest is None:
             self._left_q_rest = np.array(scene.robot.left_arm.get_joint_positions())
 
+        # Compute target poses based on input_type and frame
         right_target_pose = self._compute_target_pose(scene.robot.right_arm, right_action)
         left_target_pose = self._compute_target_pose(scene.robot.left_arm, left_action)
 
+        # Execute OSC and get joint torques
         right_tau = self._osc_step(
             scene.robot.right_arm, right_target_pose, self._right_q_rest)
         left_tau = self._osc_step(
             scene.robot.left_arm, left_target_pose, self._left_q_rest)
 
+        # Apply torques to both arms
         self._apply_joint_torques(scene.robot.right_arm, right_tau)
         self._apply_joint_torques(scene.robot.left_arm, left_tau)
 
@@ -855,3 +988,21 @@ class BimanualOSC(ArmActionMode):
 
     def unimanual_action_shape(self, scene: Scene) -> tuple:
         return 7,
+    
+    def get_config_dict(self) -> dict:
+        """Return configuration for logging/serialization.
+        
+        Useful for recording which OSC parameters were used in experiments.
+        """
+        return {
+            'input_type': self._input_type,
+            'frame': self._frame,
+            'kp_pos': self._kp_pos,
+            'kp_rot': self._kp_rot,
+            'kd_pos': self._kd_pos,
+            'kd_rot': self._kd_rot,
+            'nullspace_gain': self._nullspace_gain,
+            'nullspace_damping': self._nullspace_damping,
+            'damped_inv_lambda': self._damped_inv_lambda,
+            'max_torque': self._max_torque,
+        }
