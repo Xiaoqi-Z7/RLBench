@@ -705,24 +705,27 @@ class BimanualOSC(ArmActionMode):
     - Flexible reference frames (world/ee) and action types (absolute/delta)
     """
 
-    TORQUE_MAX_VEL = 9999.0
+    TORQUE_MAX_VEL = 9999
+    TORQUE_ZERO_EPS = 1e-8
 
     def __init__(self,
                  input_type: str = 'absolute',
                  frame: str = 'world',
-                 kp_pos: float = 1500.0,
-                 kp_rot: float = 1500.0,
-                 damping_ratio_pos: float = 1.0,
+                 disable_gravity: bool = True,
+                 kp_pos: float = 1000.0,       # 更加柔顺的位置刚度
+                 kp_rot: float = 500.0,        # 更加柔顺的姿态刚度
+                 damping_ratio_pos: float = 1.0,  # 适中阻尼
                  damping_ratio_rot: float = 1.0,
-                 nullspace_gain: float = 0.2,
-                 nullspace_damping: float = 0.05,
-                 damped_inv_lambda: float = 0.05,
-                 max_torque: float = 40.0,
+                 nullspace_gain: float = 0.05,
+                 nullspace_damping: float = 0.01,
+                 damped_inv_lambda: float = 0.2,
+                 max_torque: float = 50.,    # 极大降低最大力矩，保证绝对安全
                  desired_task_velocity: np.ndarray = None):
         """
         Args:
             input_type (str): 'absolute' or 'delta' action interpretation
             frame (str): 'world' or 'ee' (end-effector) reference frame
+            disable_gravity (bool): Whether to disable global gravity using pyrep simConst.
             kp_pos (float): Proportional gain for position [N/m]
             kp_rot (float): Proportional gain for rotation [N·m/rad]
             damping_ratio_pos (float): Damping ratio for position (1.0 = critical damping)
@@ -740,6 +743,7 @@ class BimanualOSC(ArmActionMode):
         
         self._input_type = input_type
         self._frame = frame
+        self._disable_gravity = disable_gravity
         
         # Impedance parameters (following robosuite convention)
         self._kp_pos = kp_pos
@@ -768,6 +772,8 @@ class BimanualOSC(ArmActionMode):
         # Cache rest poses for nullspace control
         self._right_q_rest = None
         self._left_q_rest = None
+
+        self.step = 0
         
         logging.info(f"BimanualOSC initialized: input_type={input_type}, frame={frame}, "
                     f"kp_pos={kp_pos}, kp_rot={kp_rot}")
@@ -858,6 +864,7 @@ class BimanualOSC(ArmActionMode):
         return self._compose_delta_pose(current_pose, action, frame=self._frame)
 
     def _osc_step(self,
+                  hand: str,
                   arm: Arm,
                   target_pose: np.ndarray,
                   q_rest: np.ndarray) -> np.ndarray:
@@ -878,73 +885,135 @@ class BimanualOSC(ArmActionMode):
         """
         # Current state
         q = np.array(arm.get_joint_positions())
-        qd = np.array(arm.get_joint_velocities())
+        dq = np.array(arm.get_joint_velocities())
         tip_pose = np.array(arm.get_tip().get_pose())
-        
+        tip_vel = np.array(arm.get_tip().get_velocity()).flatten()  # [vx, vy, vz, wx, wy, wz]
+
+        from pyrep.const import ObjectType
+        link_shapes = arm.get_objects_in_tree(object_type=ObjectType.SHAPE)
+
+        for shape in link_shapes:
+            # 物理引擎中只有被设置为 dynamic (动态支持) 的物体才参与重力和碰撞的质量计算
+            if shape.is_dynamic():
+                # print(f"部件 {shape.get_name()} 的质量为: {shape.get_mass()} kg")
+                if shape.get_name() == "Panda_rightArm_gripper":
+                    right_gripper_pose = shape.get_pose()
+                    right_gripper_vel = shape.get_velocity()
+                if shape.get_name() == "Panda_leftArm_gripper":
+                    left_gripper_pose = shape.get_pose()
+                    left_gripper_vel = shape.get_velocity()
+
+        # if hand == 'right':
+        #     tip_pose = right_gripper_pose
+        # else:
+        #     tip_pose = left_gripper_pose
         # Task-space errors
-        pos_err = target_pose[:3] - tip_pose[:3]  # [m]
-        rot_err = self._quaternion_error(target_pose[3:], tip_pose[3:])  # [rad]
+        # pos_err = target_pose[:3] - tip_pose[:3]  # desired - actual [m]
+        # rot_err = self._quaternion_error(target_pose[3:], tip_pose[3:])  # [rad]
+        min_ee_pos_error = -0.2
+        max_ee_pos_error = 0.2
+        pos_err = np.clip(target_pose[:3] - tip_pose[:3], min_ee_pos_error, max_ee_pos_error)
+        min_ee_rot_error =  -np.deg2rad(30)
+        max_ee_rot_error =  np.deg2rad(30)
+        rot_err = np.clip(self._quaternion_error(target_pose[3:], tip_pose[3:]), min_ee_rot_error, max_ee_rot_error)
+
         task_err = np.concatenate([pos_err, rot_err], axis=0)  # [6,]
         
-        # Jacobian (transpose of what arm provides; arm.get_jacobian() is typically 6xN)
-        jacobian = np.array(arm.get_jacobian()).T  # Now N x 6
+        # Apply error deadband to prevent numerical instability at small errors
+        # When error is very small, numerical precision can cause control to go in reverse
+        pos_deadband = 1e-4  # 0.1mm
+        rot_deadband = 1e-4  # rad
+        task_err[:3] = np.where(np.abs(task_err[:3]) < pos_deadband, 0, task_err[:3])
+        task_err[3:] = np.where(np.abs(task_err[3:]) < rot_deadband, 0, task_err[3:])
         
-        # Task-space velocity via forward kinematics (Jacobian * joint_velocity)
-        task_vel = jacobian @ qd  # [6,]
+        # DEBUG: Check Jacobian shape
+        jac_T_flipped = arm.get_jacobian()
+        # jac_T_raw = np.array(arm.get_jacobian())
+        jac_T_raw = np.flipud(jac_T_flipped)
+        # jac_raw = np.flipud(jac_raw)
+        # # Jacobian from PyRep: typically [6 x 7] for translational + rotational (6D task space)
+        # # But user says it returns [7x6], so let's handle both cases
+        # if jac_raw.shape == (7, 6):
+        #     # If shape is [7x6], treat it as [N_dof x 6_partials], so transpose to [6x7]
+        #     jacobian = jac_raw.T  # [6 x 7]
+        # elif jac_raw.shape == (6, 7):
+        #     # If already [6x7], use directly
+        #     jacobian = jac_raw
+        # else:
+        #     raise ValueError(f'Unexpected Jacobian shape {jac_raw.shape}; expected (6, 7) or (7, 6).')
+        
+        # jacobian[5, :] *= -1
+        # # Task-space velocity via forward kinematics (Jacobian * joint_velocity)
+        # task_vel = jacobian @ qd  # [6,]
+        task_vel = tip_vel
         
         # Impedance control gains
-        task_kp = np.array([
+        task_kp = np.diag([
             self._kp_pos, self._kp_pos, self._kp_pos,      # position gains
             self._kp_rot, self._kp_rot, self._kp_rot,       # rotation gains
         ])
-        task_kd = np.array([
+        task_kd = np.diag([
             self._kd_pos, self._kd_pos, self._kd_pos,       # position damping
             self._kd_rot, self._kd_rot, self._kd_rot,        # rotation damping
         ])
         
         # Desired wrench computed from impedance law:
         # F = kp * e_task + kd * (v_desired - v_current)
-        vel_err = self._desired_task_velocity - task_vel
-        desired_wrench = np.multiply(task_kp, task_err) + np.multiply(task_kd, vel_err)  # [6,]
+        # vel_err = self._desired_task_velocity - task_vel
+        vel_err = jac_T_raw.T @ dq
+        print(task_err, vel_err)
+        # desired_wrench = np.multiply(task_kp, task_err) + 0 * np.multiply(task_kd, vel_err)  # [6,]
+        desired_wrench = task_kp @ task_err + task_kd @ vel_err  # [6,]
         
-        # --- Jacobian pseudo-inverse with Tikhonov damping ---
-        # Avoid singularities via dampedInverse: (J^T J + lambda^2 I)^-1 J^T
-        jjt = jacobian @ jacobian.T  # [6 x 6]
-        damping_matrix = (self._damped_inv_lambda ** 2) * np.eye(jjt.shape[0])
-        jjt_damped = jjt + damping_matrix
+        # Clamp wrench to prevent torque saturation for large errors
+        # When wrench is too large, all torques hit the limit and arm can't move effectively
+        # Limit position force to ~500N and torque to ~100 N·m for stability
+        max_force = 500.0  # [N]
+        max_torque_wrench = 100.0  # [N·m]
         
-        try:
-            jjt_damped_inv = np.linalg.inv(jjt_damped)
-            jacobian_pinv = jacobian.T @ jjt_damped_inv  # [N x 6]
-        except np.linalg.LinAlgError:
-            logging.warning("Jacobian pseudo-inverse computation failed, using pseudo-inverse fallback")
-            jacobian_pinv = np.linalg.pinv(jacobian, rcond=1e-4)  # Fallback
+        pos_force_norm = np.linalg.norm(desired_wrench[:3])
+        rot_torque_norm = np.linalg.norm(desired_wrench[3:])
         
-        # Map task wrench to joint torques
-        tau_task = jacobian.T @ desired_wrench  # [N,]
+        if pos_force_norm > max_force:
+            desired_wrench[:3] *= max_force / pos_force_norm
+        if rot_torque_norm > max_torque_wrench:
+            desired_wrench[3:] *= max_torque_wrench / rot_torque_norm
         
-        # --- Nullspace control ---
-        # Nullspace projector: N = I - J_pinv @ J
-        nullspace_proj = np.eye(jacobian.shape[0]) - jacobian_pinv @ jacobian
+        # --- Map task wrench to joint torques ---
+        # Use simple Jacobian transpose (most stable for OSC when Jacobian is well-scaled)
+        # tau = J.T @ F_desired
+        tau_task = jac_T_raw @ desired_wrench  # [7,]
         
-        # Nullspace PD control to maintain rest pose (q_rest)
-        q_err_ns = q_rest - q
-        tau_null = (self._nullspace_gain * q_err_ns - 
-                    self._nullspace_damping * qd)
+        # --- Nullspace control (DISABLED for debugging) ---
+        # Temporarily disabled to isolate task-space control issues
+        # tau_null = 0
         
-        # Total torque command (task + nullspace)
-        tau_cmd = tau_task + nullspace_proj @ tau_null
+        # Total torque command (task-space only for now)
+        tau_cmd = tau_task  # Bypass nullspace projection for debugging
         
         # Clip to max torque
         tau_cmd = np.clip(tau_cmd, -self._max_torque, self._max_torque)
+        # tau_cmd = np.zeros_like(tau_cmd)  # DEBUG: Disable torques to test if arm can reach target pose via IK alone
+        # tau_cmd[1:2] = 0.1
+        print(tau_cmd)
+
         
         return tau_cmd
 
     def _apply_joint_torques(self, arm: Arm, tau: np.ndarray):
-        tml = BimanualOSC.TORQUE_MAX_VEL
-        arm.set_joint_target_velocities(
-            [(tml if t < 0.0 else -tml) for t in tau.tolist()])
-        arm.set_joint_forces(np.abs(tau).tolist())
+        # tml = BimanualOSC.TORQUE_MAX_VEL
+        # target_velocities = []
+        # if not isinstance(tau, list):
+        #     tau = tau.tolist()
+        # for t in tau:
+        #     if abs(t) <= BimanualOSC.TORQUE_ZERO_EPS:
+        #         target_velocities.append(0.0)
+        #     else:
+        #         target_velocities.append(tml if t < 0.0 else -tml)
+        # # target_velocities = np.zeros_like(target_velocities)  # Override to zero for debugging
+        # arm.set_joint_target_velocities(target_velocities)
+        # arm.set_joint_forces(np.abs(tau).tolist())
+        arm.set_joint_forces(tau.tolist())
 
     def action_pre_step(self, scene: Scene, action: np.ndarray):
         """Execute OSC for both arms.
@@ -956,8 +1025,31 @@ class BimanualOSC(ArmActionMode):
         """
         assert_action_shape(action, self.action_shape(scene))
 
+        if self._disable_gravity:
+            from pyrep.backend import sim
+            gravity_ptr = sim.ffi.new('float[3]', [0.0, 0.0, 0.0])
+            sim.simSetArrayParameter(sim.sim_arrayparam_gravity, gravity_ptr)
+            
+        from pyrep.backend import sim
+        sim.simSetFloatParameter(sim.sim_floatparam_simulation_time_step, 0.001)  # 1000 Hz simulation step
+
+        from pyrep.const import ObjectType
+
+        # 假设 scene.robot.right_arm 或者你的 arm 对象已经定义
+        # 提取机械臂层级树下的所有形状(Shape)
+        link_shapes = scene.robot.right_arm.get_objects_in_tree(object_type=ObjectType.SHAPE)
+
+        for shape in link_shapes:
+            # 物理引擎中只有被设置为 dynamic (动态支持) 的物体才参与重力和碰撞的质量计算
+            if shape.is_dynamic():
+                print(f"部件 {shape.get_name()} 的质量为: {shape.get_mass()} kg")
+
         right_action = np.array(action[:7])
         left_action = np.array(action[7:])
+
+
+        # scene.robot.right_arm.set_joint_target_velocities(np.zeros_like(right_action))
+        # scene.robot.left_arm.set_joint_target_velocities(np.zeros_like(left_action))
         
         # Validate quaternions in action
         assert_unit_quaternion(right_action[3:])
@@ -974,20 +1066,60 @@ class BimanualOSC(ArmActionMode):
         left_target_pose = self._compute_target_pose(scene.robot.left_arm, left_action)
 
         # Execute OSC and get joint torques
-        right_tau = self._osc_step(
-            scene.robot.right_arm, right_target_pose, self._right_q_rest)
-        left_tau = self._osc_step(
-            scene.robot.left_arm, left_target_pose, self._left_q_rest)
+        right_tau = self._osc_step("right", scene.robot.right_arm, right_target_pose, self._right_q_rest)
+        left_tau = self._osc_step("left", scene.robot.left_arm, left_target_pose, self._left_q_rest)
 
         # Apply torques to both arms
         self._apply_joint_torques(scene.robot.right_arm, right_tau)
         self._apply_joint_torques(scene.robot.left_arm, left_tau)
+
+    def action_post_step(self, scene: Scene, action: np.ndarray):
+        # right_action = np.array(action[:7])
+        # right_vel = np.zeros_like(right_action)
+        # # right_vel[1:2] = 20
+        # left_action = np.array(action[7:])
+        # left_vel = np.zeros_like(left_action)
+        # # left_vel[1:2] = 20
+        # # self._apply_joint_torques(scene.robot.right_arm, scene.robot.right_arm.get_joint_forces())
+        # scene.robot.right_arm.set_joint_target_velocities(right_vel)
+        # # self._apply_joint_torques(scene.robot.left_arm, scene.robot.left_arm.get_joint_forces())
+        # scene.robot.left_arm.set_joint_target_velocities(left_vel)
+        pass
+
+    def action_step(self, scene: Scene):
+        # if self.step == 0:
+        # right_action = np.array([0]*7)
+        # right_vel = np.zeros_like(right_action)
+        # # right_vel[1:2] = 20
+        # left_action = np.array([0]*7)
+        # left_vel = np.zeros_like(left_action)
+        # # left_vel[1:2] = 20
+        # # self._apply_joint_torques(scene.robot.right_arm, scene.robot.right_arm.get_joint_forces())
+        # scene.robot.right_arm.set_joint_target_velocities(right_vel)
+        # # self._apply_joint_torques(scene.robot.left_arm, scene.robot.left_arm.get_joint_forces())
+        # scene.robot.left_arm.set_joint_target_velocities(left_vel)
+        scene.step()
+        self.step += 1
+        print(scene.robot.right_arm.get_joint_velocities())
+        if self._callable_each_step is not None:
+            self._callable_each_step(scene.get_observation())
+
+
+
 
     def action_shape(self, scene: Scene) -> tuple:
         return 14,
 
     def unimanual_action_shape(self, scene: Scene) -> tuple:
         return 7,
+
+    def set_control_mode(self, robot: Robot):
+        # OSC applies wrench/torque-level commands, so disable internal
+        # position control loops that would otherwise hold joints.
+        robot.right_arm.set_control_loop_enabled(False)
+        robot.left_arm.set_control_loop_enabled(False)
+        # robot.right_arm.set_motor_locked_at_zero_velocity(False)
+        # robot.left_arm.set_motor_locked_at_zero_velocity(False)
     
     def get_config_dict(self) -> dict:
         """Return configuration for logging/serialization.
@@ -1006,3 +1138,82 @@ class BimanualOSC(ArmActionMode):
             'damped_inv_lambda': self._damped_inv_lambda,
             'max_torque': self._max_torque,
         }
+
+    # def action_pre_step(self, scene: Scene, action: np.ndarray):
+
+    #     if self._disable_gravity:
+    #         from pyrep.backend import sim
+    #         gravity_ptr = sim.ffi.new('float[3]', [0.0, 0.0, 0.0])
+    #         sim.simSetArrayParameter(sim.sim_arrayparam_gravity, gravity_ptr)
+            
+    #     from pyrep.backend import sim
+    #     sim.simSetFloatParameter(sim.sim_floatparam_simulation_time_step, 0.001)  # 1000 Hz simulation step
+
+    #     assert_action_shape(action, self.action_shape(scene))
+    #     right_action = action[:7]
+        
+    #     right_action = np.zeros_like(right_action)  # Override to zero for debugging
+    #     right_action[0:1] = 10
+    #     left_action = action[7:]
+    #     left_action = np.zeros_like(left_action)  # Override to zero for debugging
+    #     scene.robot.right_arm.set_joint_target_velocities(right_action)
+    #     scene.robot.left_arm.set_joint_target_velocities(left_action)
+
+    # def action_post_step(self, scene: Scene, action: np.ndarray):
+    #     # scene.robot.arm.set_joint_target_velocities(np.zeros_like(action))
+    #     # Current state
+    #     q = np.array(scene.robot.right_arm.get_joint_positions())
+    #     qd = np.array(scene.robot.right_arm.get_joint_velocities())
+    #     tip_pose = np.array(scene.robot.right_arm.get_tip().get_pose())
+    #     tip_vel = np.array(scene.robot.right_arm.get_tip().get_velocity()).flatten()  # [vx, vy, vz, wx, wy, wz]
+
+    #     from pyrep.const import ObjectType
+    #     link_shapes = scene.robot.right_arm.get_objects_in_tree(object_type=ObjectType.SHAPE)
+
+    #     for shape in link_shapes:
+    #         # 物理引擎中只有被设置为 dynamic (动态支持) 的物体才参与重力和碰撞的质量计算
+    #         if shape.is_dynamic():
+    #             # print(f"部件 {shape.get_name()} 的质量为: {shape.get_mass()} kg")
+    #             if shape.get_name() == "Panda_rightArm_gripper":
+    #                 right_gripper_pose = shape.get_pose()
+    #                 right_gripper_vel = shape.get_velocity()
+    #             if shape.get_name() == "Panda_leftArm_gripper":
+    #                 left_gripper_pose = shape.get_pose()
+    #                 left_gripper_vel = shape.get_velocity()
+
+
+    #     # DEBUG: Check Jacobian shape
+    #     jac_raw = np.array(scene.robot.right_arm.get_jacobian())
+    #     # jacobian = jac_raw.flatten().reshape((7, 6), order='C')  # Force column-major reshape to get correct orientation
+    #     jac_raw = np.flipud(jac_raw)
+    #     # Jacobian from PyRep: typically [6 x 7] for translational + rotational (6D task space)
+    #     # But user says it returns [7x6], so let's handle both cases
+    #     if jac_raw.shape == (7, 6):
+    #         # If shape is [7x6], treat it as [N_dof x 6_partials], so transpose to [6x7]
+    #         jacobian = jac_raw.T  # [6 x 7]
+    #     elif jac_raw.shape == (6, 7):
+    #         # If already [6x7], use directly
+    #         jacobian = jac_raw
+    #     else:
+    #         raise ValueError(f'Unexpected Jacobian shape {jac_raw.shape}; expected (6, 7) or (7, 6).')
+        
+    #     jacobian[5, :] *= -1
+    #     # Task-space velocity via forward kinematics (Jacobian * joint_velocity)
+    #     task_vel = jacobian @ qd  # [6,]
+    #     # task_vel = tip_vel
+        
+
+
+    #     right_action = action[:7]
+    #     left_action = action[7:]
+    #     scene.robot.right_arm.set_joint_target_velocities(np.zeros_like(right_action))
+    #     scene.robot.left_arm.set_joint_target_velocities(np.zeros_like(left_action))
+
+    # def action_shape(self, scene: Scene) -> tuple:
+    #     return SUPPORTED_ROBOTS[scene.robot_setup][2],
+
+    # def set_control_mode(self, robot: Robot):
+    #     robot.right_arm.set_control_loop_enabled(False)
+    #     robot.right_arm.set_motor_locked_at_zero_velocity(True)
+    #     robot.left_arm.set_control_loop_enabled(False)
+    #     robot.left_arm.set_motor_locked_at_zero_velocity(True)
