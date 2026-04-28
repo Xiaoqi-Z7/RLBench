@@ -13,6 +13,7 @@ class BimanualTakeTrayOutOfOven(BimanualTask):
     def init_task(self) -> None:
         success_detector = ProximitySensor('success')
         tray = Shape('tray')
+        self.tray = tray
         assert(isinstance(self.robot, BimanualRobot))
         self.register_graspable_objects([tray])
         self.register_success_conditions(
@@ -41,3 +42,9 @@ class BimanualTakeTrayOutOfOven(BimanualTask):
 
     def boundary_root(self) -> Object:
         return Shape('oven_boundary_root')
+
+    def get_obj_poses(self):
+        poses = {}
+        poses['tray'] = self.tray.get_pose()
+        poses['oven_boundary_root'] = self.boundary_root().get_pose()
+        return poses
