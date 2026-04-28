@@ -23,7 +23,8 @@ class LiftedCondition(Condition):
 class BimanualPickLaptop(BimanualTask):
 
     def init_task(self) -> None:
-        self.register_success_conditions([LiftedCondition(Shape('lid'), 1.0)])
+        self.laptop = Shape('lid')
+        self.register_success_conditions([LiftedCondition(self.laptop, 1.0)])
         self.waypoint_mapping = defaultdict(lambda: 'left')
         for i in range(1, 7, 2):
             self.waypoint_mapping.update({f'waypoint{i}': 'right'})
@@ -33,3 +34,8 @@ class BimanualPickLaptop(BimanualTask):
 
     def variation_count(self) -> int:
         return 1
+    
+    def get_obj_poses(self):
+        poses = {}
+        poses['laptop'] = self.laptop.get_pose()
+        return poses
