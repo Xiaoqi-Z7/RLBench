@@ -38,3 +38,8 @@ class BimanualPickPlate(BimanualTask):
 
     def base_rotation_bounds(self) -> Tuple[List[float], List[float]]:
         return [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+
+    def get_obj_poses(self):
+        poses = {}
+        poses['plate'] = self.plate.get_pose()
+        return poses
