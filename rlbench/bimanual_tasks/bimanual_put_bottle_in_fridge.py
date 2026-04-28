@@ -13,6 +13,7 @@ class BimanualPutBottleInFridge(BimanualTask):
 
     def init_task(self) -> None:
         bottle = Shape('bottle')
+        self.bottle = bottle
         self.register_graspable_objects([bottle])
         self.register_success_conditions(
             [DetectedCondition(bottle, ProximitySensor('success')),
@@ -54,3 +55,10 @@ class BimanualPutBottleInFridge(BimanualTask):
     def base_rotation_bounds(self) -> Tuple[Tuple[float, float, float],
                                             Tuple[float, float, float]]:
         return (0.0, 0.0, -np.pi / 4), (0.0, 0.0, np.pi / 4)
+
+    def get_obj_poses(self):
+        poses = {}
+        poses['bottle'] = self.bottle.get_pose()
+        poses['fridge_root'] = self.boundary_root().get_pose()
+
+        return poses
