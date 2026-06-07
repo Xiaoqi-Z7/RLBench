@@ -44,3 +44,19 @@ class BimanualPutItemInDrawer(BimanualTask):
 
     def base_rotation_bounds(self) -> Tuple[List[float], List[float]]:
         return [0, 0, - np.pi / 8], [0, 0, np.pi / 8]
+    
+    def get_obj_poses(self):
+        poses = {}
+        for obj in self.task_relevant_objects():
+            poses[obj.get_name()] = obj.get_pose()
+        return poses
+    
+    def task_relevant_objects(self):
+        return [Shape('item'), Shape('drawer_frame'), Shape('drawer_bottom'), Shape('drawer_middle'), Shape('drawer_top')]
+    
+    def get_task_relevant_obj_count(self):
+        return len(self.task_relevant_objects())
+    
+    def get_existing_relevant_objs_mask(self):
+        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+        return mask

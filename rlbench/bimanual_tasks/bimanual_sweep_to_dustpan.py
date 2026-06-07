@@ -1,4 +1,6 @@
 from typing import List
+
+import numpy
 from pyrep.objects.shape import Shape
 from pyrep.objects.proximity_sensor import ProximitySensor
 from rlbench.backend.task import Task
@@ -6,6 +8,8 @@ from rlbench.backend.conditions import DetectedCondition
 from rlbench.backend.task import BimanualTask
 from collections import defaultdict
 from rlbench.backend.spawn_boundary import SpawnBoundary
+
+import numpy as np
 
 
 DIRT_NUM = 5
@@ -43,3 +47,19 @@ class BimanualSweepToDustpan(BimanualTask):
     
     def is_static_workspace(self):
         return True
+    
+    def get_obj_poses(self):
+        poses = {}
+        for obj in self.task_relevant_objects():
+            poses[obj.get_name()] = obj.get_pose()
+        return poses
+    
+    def task_relevant_objects(self):
+        return [Shape('broom'), Shape('Dustpan_4'),  Shape('Dustpan_5'), Shape('Dustpan_3')] + self.dirts
+    
+    def get_task_relevant_obj_count(self):
+        return len(self.task_relevant_objects())
+    
+    def get_existing_relevant_objs_mask(self):
+        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+        return mask

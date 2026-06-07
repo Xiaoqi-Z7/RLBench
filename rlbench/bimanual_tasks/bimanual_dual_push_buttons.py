@@ -149,3 +149,30 @@ class BimanualDualPushButtons(BimanualTask):
             print('buttons_pushed:', self.buttons_pushed, 'buttons_to_push:',
                   self.buttons_to_push)
             raise RuntimeError('Should not be here.')
+        
+    def get_obj_poses(self):
+        poses = {}
+        for obj in self.task_relevant_objects():
+            poses[obj.get_name()] = obj.get_pose()
+        return poses
+    
+    def task_relevant_objects(self):
+        objs = []
+        objs.extend(self.target_buttons)
+        objs.extend(self.target_topPlates)
+        objs.extend(self.target_wraps)
+        return objs
+    
+    def task_total_relevant_objects(self):
+        colors_name = [c[0] for c in colors]
+        return colors_name + self.target_topPlates + self.target_wraps
+    
+    def get_task_relevant_obj_count(self):
+        return len(self.task_total_relevant_objects())
+    
+    def get_existing_relevant_objs_mask(self):
+        mask = np.zeros(self.get_task_relevant_obj_count(), dtype=bool)
+        for i, obj in enumerate(self.task_total_relevant_objects()):
+            if obj in [c[0] for c in colors] or Shape(obj) in self.target_topPlates or Shape(obj) in self.target_wraps:
+                mask[i] = True
+        return mask

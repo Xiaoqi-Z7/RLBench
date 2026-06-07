@@ -7,6 +7,7 @@ from collections import defaultdict
 
 
 from rlbench.backend.conditions import Condition
+import numpy as np
 
 class LiftedCondition(Condition):
 
@@ -43,3 +44,19 @@ class BimanualPickPlate(BimanualTask):
         poses = {}
         poses['plate'] = self.plate.get_pose()
         return poses
+    
+    def get_obj_poses(self):
+        poses = {}
+        for obj in self.task_relevant_objects():
+            poses[obj.get_name()] = obj.get_pose()
+        return poses
+    
+    def task_relevant_objects(self):
+        return [Shape('plate')]
+    
+    def get_task_relevant_obj_count(self):
+        return len(self.task_relevant_objects())
+    
+    def get_existing_relevant_objs_mask(self):
+        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+        return mask

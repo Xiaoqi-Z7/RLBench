@@ -8,12 +8,13 @@ from rlbench.backend.task import Task
 from rlbench.backend.conditions import DetectedCondition, NothingGrasped
 from rlbench.backend.task import BimanualTask
 
+import numpy as np
+
 class BimanualTakeTrayOutOfOven(BimanualTask):
 
     def init_task(self) -> None:
         success_detector = ProximitySensor('success')
         tray = Shape('tray')
-        self.tray = tray
         assert(isinstance(self.robot, BimanualRobot))
         self.register_graspable_objects([tray])
         self.register_success_conditions(
@@ -45,6 +46,16 @@ class BimanualTakeTrayOutOfOven(BimanualTask):
 
     def get_obj_poses(self):
         poses = {}
-        poses['tray'] = self.tray.get_pose()
-        poses['oven_boundary_root'] = self.boundary_root().get_pose()
+        for obj in self.task_relevant_objects():
+            poses[obj.get_name()] = obj.get_pose()
         return poses
+    
+    def task_relevant_objects(self):
+        return [Shape('tray'), Shape('oven_base'), Shape('oven_door')]
+
+    def get_task_relevant_obj_count(self):
+        return len(self.task_relevant_objects())
+
+    def get_existing_relevant_objs_mask(self):
+        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+        return mask

@@ -38,9 +38,19 @@ class BimanualPushBox(BimanualTask):
     def base_rotation_bounds(self) -> Tuple[List[float], List[float]]:
         angle = np.deg2rad(10)
         return [0, 0, - angle], [0, 0, angle]
-    
+
     def get_obj_poses(self):
         poses = {}
-        poses['cube'] = self.item.get_pose()
-        poses['target'] = self.target.get_pose()
+        for obj in self.task_relevant_objects():
+            poses[obj.get_name()] = obj.get_pose()
         return poses
+    
+    def task_relevant_objects(self):
+        return [Shape('cube'), Shape('target')]
+    
+    def get_task_relevant_obj_count(self):
+        return len(self.task_relevant_objects())
+    
+    def get_existing_relevant_objs_mask(self):
+        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+        return mask
