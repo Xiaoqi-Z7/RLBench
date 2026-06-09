@@ -473,3 +473,52 @@ class BimanualTask(Task):
         waypoints = self.get_waypoints()
         wm = self.waypoint_mapping
         return [w for w in waypoints if wm[w.name] == 'left']
+    
+    def get_obj_poses(self):
+        """
+        Returns two separate dictionaries containing object poses:
+        - local_poses: Compressed, contiguous integer IDs starting from 0 (Single-Task).
+        - global_poses: Absolute static integer IDs from the master registry (Multi-Task).
+        """
+        from rlbench.bimanual_tasks.generate_registry import LocalRegistryReader
+        local_poses = {}
+        global_poses = {}
+        task_name = self.__class__.__name__ 
+        
+        # Automatically initialize and compute vocabulary sizes on the first call
+        if not hasattr(self, '_local_id_translator'):
+            # Load the single-task compact mapping
+            self._local_id_translator = LocalRegistryReader.get_task_subset_mapping(task_name)
+            self._total_local_objects = len(self._local_id_translator)
+            
+            # AUTOMATIC SOLUTION: The total number of unique IDs in the entire 
+            # global JSON file is exactly the total global vocabulary size.
+            LocalRegistryReader.load() # Ensure file is read
+            self._total_global_objects = len(LocalRegistryReader._mapping)
+            
+            print(f"📊 [Vocabulary Info] Task: {task_name} | Local Size: {self._total_local_objects} | Global Total Size: {self._total_global_objects}")
+            
+        for obj in self.task_relevant_objects():
+            raw_name = obj.get_name() 
+            
+            # Safe color RGB extraction
+            color_rgb = None
+            if hasattr(obj, 'get_color'):
+                try:
+                    color_rgb = obj.get_color()
+                    if color_rgb is not None:
+                        color_rgb = tuple(color_rgb)
+                except Exception:
+                    color_rgb = None
+            
+            # 1. Fetch the absolute global ID (e.g., 45)
+            global_id = LocalRegistryReader.get_id(task_name, raw_name, color_rgb)
+            
+            # 2. Translate to the compact local ID (e.g., 0)
+            local_id = self._local_id_translator[global_id]
+            
+            # 3. Populate both data dictionaries
+            global_poses[global_id] = obj.get_pose()
+            local_poses[local_id] = obj.get_pose()
+            
+        return local_poses, global_poses

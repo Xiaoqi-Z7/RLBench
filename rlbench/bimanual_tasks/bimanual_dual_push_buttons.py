@@ -11,6 +11,8 @@ from rlbench.backend.conditions import JointCondition, ConditionSet
 from rlbench.backend.task import BimanualTask
 from collections import defaultdict
 
+from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
+
 MAX_VARIATIONS = 50
 
 # button top plate and wrapper will be be red before task completion
@@ -150,29 +152,56 @@ class BimanualDualPushButtons(BimanualTask):
                   self.buttons_to_push)
             raise RuntimeError('Should not be here.')
         
-    def get_obj_poses(self):
-        poses = {}
-        for obj in self.task_relevant_objects():
-            poses[obj.get_name()] = obj.get_pose()
-        return poses
+    # def get_obj_poses(self):
+    #     poses = {}
+    #     for obj in self.task_relevant_objects():
+    #         poses[obj.get_name()] = obj.get_pose()
+    #     return poses
     
-    def task_relevant_objects(self):
-        objs = []
-        objs.extend(self.target_buttons)
-        objs.extend(self.target_topPlates)
-        objs.extend(self.target_wraps)
-        return objs
+    # def task_relevant_objects(self):
+    #     objs = []
+    #     objs.extend(self.target_buttons)
+    #     objs.extend(self.target_topPlates)
+    #     objs.extend(self.target_wraps)
+    #     return objs
     
-    def task_total_relevant_objects(self):
-        colors_name = [c[0] for c in colors]
-        return colors_name + self.target_topPlates + self.target_wraps
+    # def task_total_relevant_objects(self):
+    #     colors_name = [c[0] for c in colors]
+    #     return colors_name + self.target_topPlates + self.target_wraps
     
-    def get_task_relevant_obj_count(self):
-        return len(self.task_total_relevant_objects())
+    # def get_task_relevant_obj_count(self):
+    #     return len(self.task_total_relevant_objects())
     
-    def get_existing_relevant_objs_mask(self):
-        mask = np.zeros(self.get_task_relevant_obj_count(), dtype=bool)
-        for i, obj in enumerate(self.task_total_relevant_objects()):
-            if obj in [c[0] for c in colors] or Shape(obj) in self.target_topPlates or Shape(obj) in self.target_wraps:
-                mask[i] = True
-        return mask
+    # def get_existing_relevant_objs_mask(self):
+    #     mask = np.zeros(self.get_task_relevant_obj_count(), dtype=bool)
+    #     for i, obj in enumerate(self.task_total_relevant_objects()):
+    #         if obj in [c[0] for c in colors] or Shape(obj) in self.target_topPlates or Shape(obj) in self.target_wraps:
+    #             mask[i] = True
+    #     return mask
+    
+    @classmethod
+    def pre_register_all(cls):
+        """
+        [STATIC PRE-REGISTRATION]
+        Run once at startup to register all possible object-color combinations 
+        for this task into the global registry.
+        """
+        # Automatically get the class name string ("BimanualDualPushButtons")
+        task_name = cls.__name__
+        
+        # 1. Register all 3 targets across all 18 possible colors from your colors list
+        # This covers every single permutation that train/test might ever generate.
+        for i in range(3):
+            obj_name = f'push_buttons_target{i}'
+            for _, rgb_val in colors:
+                # Force register the combination into the master generator sheet
+                GlobalRegistryGenerator.force_register(task_name, obj_name, rgb_val)
+                
+        # 2. Register objects that have fixed colors (like the red plates and wraps)
+        # We match the exact [1.0, 0.0, 0.0] tuple used in your init_episode set_color calls.
+        fixed_red_rgb = (1.0, 0.0, 0.0)
+        for i in range(3):
+            GlobalRegistryGenerator.force_register(task_name, f'target_button_topPlate{i}', fixed_red_rgb)
+            GlobalRegistryGenerator.force_register(task_name, f'target_button_wrap{i}', fixed_red_rgb)
+            
+        print(f"✅ Successfully pre-registered all permutations for task: {task_name}")
