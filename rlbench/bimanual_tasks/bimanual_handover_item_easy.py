@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import List, Tuple
 
 import numpy as np
+
 from pyrep.objects.proximity_sensor import ProximitySensor
 from pyrep.objects.shape import Shape
 from rlbench.backend.conditions import DetectedCondition
@@ -65,18 +66,34 @@ class BimanualHandoverItemEasy(BimanualTask):
     def base_rotation_bounds(self) -> Tuple[List[float], List[float]]:
         return [0, 0, - np.pi / 8], [0, 0, np.pi / 8]
     
-    def get_obj_poses(self):
-        poses = {}
-        for obj in self.task_relevant_objects():
-            poses[obj.get_name()] = obj.get_pose()
-        return poses
+    # def get_obj_poses(self):
+    #     poses = {}
+    #     for obj in self.task_relevant_objects():
+    #         poses[obj.get_name()] = obj.get_pose()
+    #     return poses
     
     def task_relevant_objects(self):
         return [Shape('item')]
     
-    def get_task_relevant_obj_count(self):
-        return len(self.task_relevant_objects())
+    # def get_task_relevant_obj_count(self):
+    #     return len(self.task_relevant_objects())
     
-    def get_existing_relevant_objs_mask(self):
-        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
-        return mask
+    # def get_existing_relevant_objs_mask(self):
+    #     mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+    #     return mask
+    @classmethod
+    def pre_register_all(cls):
+        """
+        [STATIC PRE-REGISTRATION]
+        Run once at startup to register all possible objects 
+        for this task into the global registry.
+        """
+        from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
+        # Automatically get the class name string ("BimanualHandoverItemEasy")
+        task_name = cls.__name__
+        
+        # This task only has one relevant object: the 'item'.
+        # Since it does not randomize colors in init_episode, color_rgb is None.
+        GlobalRegistryGenerator.force_register(task_name, 'item', color_rgb=None)
+            
+        print(f"✅ Successfully pre-registered objects for task: {task_name}")

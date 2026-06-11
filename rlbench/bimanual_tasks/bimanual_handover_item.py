@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import List, Tuple
 
 import numpy as np
+
 from pyrep.objects.proximity_sensor import ProximitySensor
 from pyrep.objects.shape import Shape
 from rlbench.backend.conditions import DetectedCondition
@@ -100,20 +101,39 @@ class BimanualHandoverItem(BimanualTask):
     def base_rotation_bounds(self) -> Tuple[List[float], List[float]]:
         return [0, 0, - np.pi / 8], [0, 0, np.pi / 8]
     
-    def get_obj_poses(self):
-        poses = {}
-        for color in colors:
-            for obj in self.task_relevant_objects():
-                if obj.get_color() == color[1]:
-                    poses[obj.get_name()] = obj.get_pose()
-        return poses
+    # def get_obj_poses(self):
+    #     poses = {}
+    #     for color in colors:
+    #         for obj in self.task_relevant_objects():
+    #             if obj.get_color() == color[1]:
+    #                 poses[obj.get_name()] = obj.get_pose()
+    #     return poses
     
     def task_relevant_objects(self):
         return self.items
     
-    def get_task_relevant_obj_count(self):
-        return len(self.task_relevant_objects())
+    # def get_task_relevant_obj_count(self):
+    #     return len(self.task_relevant_objects())
     
-    def get_existing_relevant_objs_mask(self):
-        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
-        return mask
+    # def get_existing_relevant_objs_mask(self):
+    #     mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+    #     return mask
+    @classmethod
+    def pre_register_all(cls):
+        """
+        [STATIC PRE-REGISTRATION]
+        Run once at startup to register all possible object-color combinations 
+        for this task into the global registry.
+        """
+        from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
+        task_name = cls.__name__
+        
+        # We have 5 items (item0 to item4) and 5 colors.
+        # Since colors are shuffled in init_episode, any item can be any color.
+        # We must register all 5 x 5 = 25 possible combinations.
+        for i in range(5):
+            obj_name = f'item{i}'
+            for _, rgb_val in colors:
+                GlobalRegistryGenerator.force_register(task_name, obj_name, rgb_val)
+                
+        print(f"✅ Successfully pre-registered all permutations for task: {task_name}")

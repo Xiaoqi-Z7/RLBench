@@ -1,5 +1,7 @@
 from collections import defaultdict
 from typing import List, Tuple
+
+
 from pyrep.objects.shape import Shape
 from pyrep.objects.object import Object
 from pyrep.objects.proximity_sensor import ProximitySensor
@@ -44,18 +46,34 @@ class BimanualTakeTrayOutOfOven(BimanualTask):
     def boundary_root(self) -> Object:
         return Shape('oven_boundary_root')
 
-    def get_obj_poses(self):
-        poses = {}
-        for obj in self.task_relevant_objects():
-            poses[obj.get_name()] = obj.get_pose()
-        return poses
+    # def get_obj_poses(self):
+    #     poses = {}
+    #     for obj in self.task_relevant_objects():
+    #         poses[obj.get_name()] = obj.get_pose()
+    #     return poses
     
     def task_relevant_objects(self):
         return [Shape('tray'), Shape('oven_base'), Shape('oven_door')]
 
-    def get_task_relevant_obj_count(self):
-        return len(self.task_relevant_objects())
+    # def get_task_relevant_obj_count(self):
+    #     return len(self.task_relevant_objects())
 
-    def get_existing_relevant_objs_mask(self):
-        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
-        return mask
+    # def get_existing_relevant_objs_mask(self):
+    #     mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+    #     return mask
+    @classmethod
+    def pre_register_all(cls):
+        """
+        [STATIC PRE-REGISTRATION]
+        Run once at startup to register all possible objects 
+        for this task into the global registry.
+        """
+        from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
+        task_name = cls.__name__
+        
+        # This task only has one relevant object: the 'ball'.
+        # Since it does not randomize colors, color_rgb is None.
+        for obj_name in ['tray', 'oven_base', 'oven_door']:
+            GlobalRegistryGenerator.force_register(task_name, obj_name, color_rgb=None)
+            
+        print(f"✅ Successfully pre-registered objects for task: {task_name}")

@@ -705,7 +705,12 @@ class Scene(object):
                     f'{camera_name}_camera_far': camera.get_far_clipping_plane(),
                 })
         misc.update({"variation_index": self._variation_index})
-        misc.update({"object_poses": self.task.get_obj_poses()})
+        object_poses_local, object_poses_global, num_local_type, num_global_type, num_objects = self.task.get_obj_poses()
+        misc.update({"object_poses_local": object_poses_local})
+        misc.update({"object_poses_global": object_poses_global})
+        misc.update({"num_local_objects_type": num_local_type})
+        misc.update({"num_global_objects_type": num_global_type})
+        misc.update({"num_objects": num_objects})
         if self.robot.is_bimanual and self._right_execute_demo_joint_position_action is not None:
             
             misc.update({"right_executed_demo_joint_position_action": self._right_execute_demo_joint_position_action,

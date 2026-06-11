@@ -11,7 +11,7 @@ from rlbench.backend.conditions import JointCondition, ConditionSet
 from rlbench.backend.task import BimanualTask
 from collections import defaultdict
 
-from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
+
 
 MAX_VARIATIONS = 50
 
@@ -158,12 +158,12 @@ class BimanualDualPushButtons(BimanualTask):
     #         poses[obj.get_name()] = obj.get_pose()
     #     return poses
     
-    # def task_relevant_objects(self):
-    #     objs = []
-    #     objs.extend(self.target_buttons)
-    #     objs.extend(self.target_topPlates)
-    #     objs.extend(self.target_wraps)
-    #     return objs
+    def task_relevant_objects(self):
+        objs = []
+        objs.extend(self.target_buttons)
+        objs.extend(self.target_topPlates)
+        objs.extend(self.target_wraps)
+        return objs
     
     # def task_total_relevant_objects(self):
     #     colors_name = [c[0] for c in colors]
@@ -186,6 +186,7 @@ class BimanualDualPushButtons(BimanualTask):
         Run once at startup to register all possible object-color combinations 
         for this task into the global registry.
         """
+        from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
         # Automatically get the class name string ("BimanualDualPushButtons")
         task_name = cls.__name__
         

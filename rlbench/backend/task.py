@@ -497,19 +497,22 @@ class BimanualTask(Task):
             self._total_global_objects = len(LocalRegistryReader._mapping)
             
             print(f"📊 [Vocabulary Info] Task: {task_name} | Local Size: {self._total_local_objects} | Global Total Size: {self._total_global_objects}")
+
+        num_global_type = self._total_global_objects
             
         for obj in self.task_relevant_objects():
             raw_name = obj.get_name() 
             
             # Safe color RGB extraction
             color_rgb = None
-            if hasattr(obj, 'get_color'):
-                try:
-                    color_rgb = obj.get_color()
-                    if color_rgb is not None:
-                        color_rgb = tuple(color_rgb)
-                except Exception:
-                    color_rgb = None
+            if self.__class__.__name__ in ['BimanualDualPushButtons', 'BimanualHandoverItem']:
+                if hasattr(obj, 'get_color'):
+                    try:
+                        color_rgb = obj.get_color()
+                        if color_rgb is not None:
+                            color_rgb = tuple(color_rgb)
+                    except Exception:
+                        color_rgb = None
             
             # 1. Fetch the absolute global ID (e.g., 45)
             global_id = LocalRegistryReader.get_id(task_name, raw_name, color_rgb)
@@ -520,5 +523,9 @@ class BimanualTask(Task):
             # 3. Populate both data dictionaries
             global_poses[global_id] = obj.get_pose()
             local_poses[local_id] = obj.get_pose()
+
+        num_local_type = self._total_local_objects
+        num_objects = len(self.task_relevant_objects())
+        
             
-        return local_poses, global_poses
+        return local_poses, global_poses, num_local_type, num_global_type, num_objects

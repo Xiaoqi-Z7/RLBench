@@ -1,4 +1,6 @@
 from typing import List
+
+
 from pyrep.objects.joint import Joint
 from rlbench.backend.conditions import JointCondition
 from rlbench.backend.task import Task
@@ -35,18 +37,34 @@ class BimanualPickLaptop(BimanualTask):
     def variation_count(self) -> int:
         return 1
     
-    def get_obj_poses(self):
-        poses = {}
-        for obj in self.task_relevant_objects():
-            poses[obj.get_name()] = obj.get_pose()
-        return poses
+    # def get_obj_poses(self):
+    #     poses = {}
+    #     for obj in self.task_relevant_objects():
+    #         poses[obj.get_name()] = obj.get_pose()
+    #     return poses
     
     def task_relevant_objects(self):
         return [Shape('lid'), Shape('base')]
     
-    def get_task_relevant_obj_count(self):
-        return len(self.task_relevant_objects())
+    # def get_task_relevant_obj_count(self):
+    #     return len(self.task_relevant_objects())
 
-    def get_existing_relevant_objs_mask(self):
-        mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
-        return mask
+    # def get_existing_relevant_objs_mask(self):
+    #     mask = np.ones(self.get_task_relevant_obj_count(), dtype=bool)
+    #     return mask
+    @classmethod
+    def pre_register_all(cls):
+        """
+        [STATIC PRE-REGISTRATION]
+        Run once at startup to register all possible objects 
+        for this task into the global registry.
+        """
+        from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
+        task_name = cls.__name__
+        
+        # This task only has one relevant object: the 'ball'.
+        # Since it does not randomize colors, color_rgb is None.
+        for obj_name in ['lid', 'base']:
+            GlobalRegistryGenerator.force_register(task_name, obj_name, color_rgb=None)
+            
+        print(f"✅ Successfully pre-registered objects for task: {task_name}")
