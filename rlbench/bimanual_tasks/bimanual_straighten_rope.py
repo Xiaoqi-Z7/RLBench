@@ -40,7 +40,7 @@ class BimanualStraightenRope(BimanualTask):
     #     return poses
     
     def task_relevant_objects(self):
-        return [Shape('head'), Shape('tail'), Shape('success_head'), Shape('success_tail')]
+        return [Shape('head'), Shape('tail'), ProximitySensor('success_head'), ProximitySensor('success_tail')]
     
     # def get_task_relevant_obj_count(self):
     #     return len(self.task_relevant_objects())

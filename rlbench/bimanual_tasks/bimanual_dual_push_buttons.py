@@ -12,6 +12,9 @@ from rlbench.backend.task import BimanualTask
 from collections import defaultdict
 
 
+import re
+
+
 
 MAX_VARIATIONS = 50
 
@@ -161,8 +164,6 @@ class BimanualDualPushButtons(BimanualTask):
     def task_relevant_objects(self):
         objs = []
         objs.extend(self.target_buttons)
-        objs.extend(self.target_topPlates)
-        objs.extend(self.target_wraps)
         return objs
     
     # def task_total_relevant_objects(self):
@@ -183,26 +184,57 @@ class BimanualDualPushButtons(BimanualTask):
     def pre_register_all(cls):
         """
         [STATIC PRE-REGISTRATION]
-        Run once at startup to register all possible object-color combinations 
-        for this task into the global registry.
+        Only registers the 18 possible colors for the buttons. 
+        Top plates and wraps are completely ignored.
         """
         from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
-        # Automatically get the class name string ("BimanualDualPushButtons")
         task_name = cls.__name__
         
-        # 1. Register all 3 targets across all 18 possible colors from your colors list
-        # This covers every single permutation that train/test might ever generate.
-        for i in range(3):
-            obj_name = f'push_buttons_target{i}'
-            for _, rgb_val in colors:
-                # Force register the combination into the master generator sheet
-                GlobalRegistryGenerator.force_register(task_name, obj_name, rgb_val)
-                
-        # 2. Register objects that have fixed colors (like the red plates and wraps)
-        # We match the exact [1.0, 0.0, 0.0] tuple used in your init_episode set_color calls.
-        fixed_red_rgb = (1.0, 0.0, 0.0)
-        for i in range(3):
-            GlobalRegistryGenerator.force_register(task_name, f'target_button_topPlate{i}', fixed_red_rgb)
-            GlobalRegistryGenerator.force_register(task_name, f'target_button_wrap{i}', fixed_red_rgb)
+        # Register ONLY the generic button target with 18 colors
+        for _, rgb_val in colors:
+            GlobalRegistryGenerator.force_register(task_name, 'push_buttons_target', rgb_val)
             
-        print(f"✅ Successfully pre-registered all permutations for task: {task_name}")
+        print(f"✅ Successfully pre-registered exactly 18 combinations for task: {task_name}")
+
+    def get_obj_poses(self):
+        from rlbench.bimanual_tasks.generate_registry import LocalRegistryReader
+        local_poses = {}
+        global_poses = {}
+        task_name = self.__class__.__name__ 
+        
+        if not hasattr(self, '_local_id_translator'):
+            self._local_id_translator = LocalRegistryReader.get_task_subset_mapping(task_name)
+            self._total_local_objects = len(self._local_id_translator)
+            LocalRegistryReader.load() 
+            self._total_global_objects = len(LocalRegistryReader._mapping)
+
+        num_global_type = self._total_global_objects
+            
+        for obj in self.task_relevant_objects():
+            raw_name = obj.get_name() 
+            
+            # Strip the digits (e.g., 'push_buttons_target2' -> 'push_buttons_target')
+            base_name = re.sub(r'\d+$', '', raw_name)
+            
+            # Safe color RGB extraction
+            color_rgb = None
+            if hasattr(obj, 'get_color'):
+                try:
+                    color_rgb = obj.get_color()
+                    if color_rgb is not None:
+                        color_rgb = tuple(color_rgb)
+                except Exception:
+                    color_rgb = None
+            
+            # Fetch IDs using the generic base_name
+            global_id = LocalRegistryReader.get_id(task_name, base_name, color_rgb)
+            local_id = self._local_id_translator[global_id]
+            
+            global_poses[global_id] = obj.get_pose()
+            local_poses[local_id] = obj.get_pose()
+
+        num_local_type = self._total_local_objects
+        num_objects = len(self.task_relevant_objects())
+        
+        return local_poses, global_poses, num_local_type, num_global_type, num_objects
+

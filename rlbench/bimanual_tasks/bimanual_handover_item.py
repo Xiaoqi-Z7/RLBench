@@ -14,6 +14,8 @@ from absl import logging
 from pyrep.objects.object import Object
 from rlbench.backend.conditions import Condition
 
+import re
+
 
 colors = [
     ('red', (1.0, 0.0, 0.0)),
@@ -128,12 +130,70 @@ class BimanualHandoverItem(BimanualTask):
         from rlbench.bimanual_tasks.generate_registry import GlobalRegistryGenerator
         task_name = cls.__name__
         
-        # We have 5 items (item0 to item4) and 5 colors.
-        # Since colors are shuffled in init_episode, any item can be any color.
-        # We must register all 5 x 5 = 25 possible combinations.
-        for i in range(5):
-            obj_name = f'item{i}'
-            for _, rgb_val in colors:
-                GlobalRegistryGenerator.force_register(task_name, obj_name, rgb_val)
+        # 优化后：所有的物理方块统称为 'item'。
+        # 既然一共只有 5 种颜色，我们只需要注册 5 个语义 ID 即可。
+        for _, rgb_val in colors:
+            GlobalRegistryGenerator.force_register(task_name, 'item', rgb_val)
                 
-        print(f"✅ Successfully pre-registered all permutations for task: {task_name}")
+        print(f"✅ Successfully pre-registered 5 combinations for task: {task_name}")
+
+    def get_obj_poses(self):
+        """
+        Returns two separate dictionaries containing object poses and metadata:
+        - local_poses: Compressed, contiguous integer IDs starting from 0 (Single-Task).
+        - global_poses: Absolute static integer IDs from the master registry (Multi-Task).
+        - num_local_type: Size of the local subset vocabulary.
+        - num_global_type: Size of the total global vocabulary.
+        - num_objects: Number of relevant physical objects currently in the scene.
+        """
+        from rlbench.bimanual_tasks.generate_registry import LocalRegistryReader
+        local_poses = {}
+        global_poses = {}
+        task_name = self.__class__.__name__ 
+        
+        # Automatically initialize and compute vocabulary sizes on the first call
+        if not hasattr(self, '_local_id_translator'):
+            # Load the single-task compact mapping
+            self._local_id_translator = LocalRegistryReader.get_task_subset_mapping(task_name)
+            self._total_local_objects = len(self._local_id_translator)
+            
+            # AUTOMATIC SOLUTION: The total number of unique IDs in the entire 
+            # global JSON file is exactly the total global vocabulary size.
+            LocalRegistryReader.load() # Ensure file is read
+            self._total_global_objects = len(LocalRegistryReader._mapping)
+            
+            print(f"📊 [Vocabulary Info] Task: {task_name} | Local Size: {self._total_local_objects} | Global Total Size: {self._total_global_objects}")
+
+        num_global_type = self._total_global_objects
+            
+        for obj in self.task_relevant_objects():
+            raw_name = obj.get_name() 
+            
+            # [CRITICAL FIX] Strip digits from the end to unify 'item0', 'item1', etc., into 'item'
+            base_name = re.sub(r'\d+$', '', raw_name)
+            
+            # Safe color RGB extraction (only applied for tasks that randomize colors)
+            color_rgb = None
+            if task_name in ['BimanualDualPushButtons', 'BimanualHandoverItem']:
+                if hasattr(obj, 'get_color'):
+                    try:
+                        color_rgb = obj.get_color()
+                        if color_rgb is not None:
+                            color_rgb = tuple(color_rgb)
+                    except Exception:
+                        color_rgb = None
+            
+            # 1. Fetch the absolute global ID using the cleaned base_name!
+            global_id = LocalRegistryReader.get_id(task_name, base_name, color_rgb)
+            
+            # 2. Translate to the compact local ID
+            local_id = self._local_id_translator[global_id]
+            
+            # 3. Populate both data dictionaries
+            global_poses[global_id] = obj.get_pose()
+            local_poses[local_id] = obj.get_pose()
+
+        num_local_type = self._total_local_objects
+        num_objects = len(self.task_relevant_objects())
+        
+        return local_poses, global_poses, num_local_type, num_global_type, num_objects
