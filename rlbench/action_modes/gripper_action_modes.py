@@ -262,20 +262,64 @@ class UnimanualDiscrete(GripperActionMode):
 
 
 class BimanualDiscrete(Discrete):
-    
-    def _actuate(self, scene, action):
 
+    # ---- gripper stiffening parameters ----
+    GRIPPER_PID_P = 50.0       # default ~0.1-1.0, raise to 50 for firm grip
+    GRIPPER_MAX_FORCE = 100.0  # default ~5-20 N, raise to 100 N
+    GRIPPER_CLOSE_VELOCITY = 0.5  # default 0.2, raise for faster/stronger close
+    GRIPPER_OPEN_VELOCITY = 0.2   # keep open speed moderate
+
+    @staticmethod
+    def _boost_gripper_joint(gripper, amount, velocity):
+        """Temporarily boost gripper joint PID-P and max-force for firm gripping.
+
+        When *closing* (amount < 0.5), we raise the joint motor PID P-gain and
+        max-force so the fingers physically squeeze harder.  The parameters are
+        left at the boosted values after the call — there is no meaningful
+        downside to keeping them high.
+
+        Args:
+            gripper: a PyRep Gripper instance.
+            amount: float in [0, 1] — 0 = fully closed, 1 = fully open.
+            velocity: float — target joint velocity magnitude.
+        """
+        from pyrep.backend import sim
+
+        is_closing = amount < 0.5
+        for j in gripper.joints:
+            jh = j.get_handle()
+            if is_closing:
+                sim.simSetObjectFloatParameter(
+                    jh, sim.sim_jointfloatparam_pid_p,
+                    BimanualDiscrete.GRIPPER_PID_P)
+                sim.simSetJointMaxForce(
+                    jh, BimanualDiscrete.GRIPPER_MAX_FORCE)
+
+    def _actuate(self, scene, action):
         right_action = action[0]
         left_action = action[1]
+
+        # Boost gripper joint stiffness before actuation
+        self._boost_gripper_joint(
+            scene.robot.right_gripper, right_action,
+            self.GRIPPER_CLOSE_VELOCITY if right_action < 0.5 else self.GRIPPER_OPEN_VELOCITY)
+        self._boost_gripper_joint(
+            scene.robot.left_gripper, left_action,
+            self.GRIPPER_CLOSE_VELOCITY if left_action < 0.5 else self.GRIPPER_OPEN_VELOCITY)
+
+        # Use higher velocity for closing, moderate for opening
+        right_vel = self.GRIPPER_CLOSE_VELOCITY if right_action < 0.5 else self.GRIPPER_OPEN_VELOCITY
+        left_vel = self.GRIPPER_CLOSE_VELOCITY if left_action < 0.5 else self.GRIPPER_OPEN_VELOCITY
+
         done = False
         right_done = False
         left_done = False
 
         while not done:
             if not right_done:
-                right_done = scene.robot.right_gripper.actuate(right_action, velocity=0.2)
+                right_done = scene.robot.right_gripper.actuate(right_action, velocity=right_vel)
             if not left_done:
-                left_done = scene.robot.left_gripper.actuate(left_action, velocity=0.2)
+                left_done = scene.robot.left_gripper.actuate(left_action, velocity=left_vel)
             done = right_done and left_done
             scene.pyrep.step()
             scene.task.step()
