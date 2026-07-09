@@ -451,7 +451,7 @@ class BimanualEndEffectorPoseViaPlanning(EndEffectorPoseViaPlanning):
 
         done = False
 
-        limit_time = 30 # seconds
+        limit_time = 5 # seconds
         duration = 0
         start_time = time.time()
         while not done:
